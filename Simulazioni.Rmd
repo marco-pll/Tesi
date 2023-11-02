@@ -1,0 +1,3342 @@
+---
+title: "Simulazioni"
+author: "Marco"
+date: "2023-10-03"
+output: html_document
+---
+```{r Reset}
+rm(list=ls())
+```
+
+```{r Libraries}
+library(MASS)
+library(ggplot2)
+library(glmnet)
+library(ranger)
+library(gbm)
+
+## Per generare le matrici di varianbza e covarianza.
+#library(clusterGeneration)
+library(Matrix)
+
+
+# Calcolo parallelo
+library(foreach)
+library(doParallel)
+
+# Reti neurali
+library(keras)
+library(tensorflow)
+```
+
+```{r Simulazioni - Funzioni senza cambiamento nel tempo}
+
+## Matrice di varianza e covarianza con correlazione.
+get_Sigma <- function(nvar_input) {
+  Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input, ncol=nvar_input)
+  Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+  diag(Sigma) <- rep(1, nvar_input)
+  return(list(mat = nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat, convergence = nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$converged))
+}
+
+## Aggiunge outliers
+add.outliers <- function(output, freq) {
+  sd <- sd(output)
+  num.out <- floor(length(output)*freq)
+  ind <- sample(1:length(output), num.out, replace=FALSE )
+  output[ind] <- (abs(output[ind]) + 3*sd) * sign(output[ind])
+  return(output)
+}
+
+
+
+
+## Noise normale
+noise.lin <- function(n) {
+  return(rnorm(n = n,mean = 0, sd = sqrt(noise_Sigma)))
+}
+
+## Output funzione lineare
+lin.out <- function(input) {
+  ## coef[1] è l'intercetta, il resto i coefficienti.
+  coef <- runif(ncol(input) + 1, min = -5, max = 5)
+  output <- apply(input,1,function(x) coef[1] + t(as.matrix(x))%*%as.matrix(coef[2:length(coef)]))
+  cat("\nMain effects: ",coef)
+  output <- output + noise.lin(nrow(input))
+  return(output)
+}
+
+
+
+
+## Relazione quadratica con l'output
+quad.out <- function(input) {
+  
+  ## Effetto lineare della variabile
+  main.eff <- lin.out(input)
+  
+  ## coef.sq sono per la parte quadratica.
+  coef.sq <- runif(ncol(input), min = -5, max = 5)
+  sq.eff <- apply(input,1,function(x) t(as.matrix(x^2))%*%as.matrix(coef.sq))
+  
+  cat("\nSquare effects:",coef.sq)
+  ## Output come funzione dei quadrati e degli effetti principali.
+  output <- main.eff + sq.eff
+  return(output)
+}
+
+
+cub.out <- function(input) {
+  
+  ## Effetto lineare della variabile
+  #main.eff <- quad.out(input)
+  main.eff <- 0
+  
+  ## coef.sq sono per la parte quadratica.
+  coef.cub <- runif(ncol(input), min = -5, max = 5)
+  cub.eff <- apply(input,1,function(x) t(as.matrix(x^3))%*%as.matrix(coef.cub))
+  
+  cat("\nCubic effects:",coef.cub)
+  ## Output come funzione dei quadrati e degli effetti principali.
+  output <- main.eff + cub.eff + noise.lin(nrow(input))
+  return(output)
+}
+
+
+## Relazione lineare con interazioni.
+#n_int = 8
+
+interaction.out <- function(input) {
+  
+  ## Definisco gli oggetti necessari all'interno
+  ints <- matrix("V0", nrow=n_int, ncol=2)
+  var_inter <- rep(0,ncol(input))
+  names(var_inter) <- colnames(input)
+
+  coef.int <- runif(n_int, min = -5, max = 5)
+  
+  main.eff <- lin.out(input)
+  
+  ## Interazioni casuali tra variabili
+  ## Scegliamo le combinazioni tra cui inserire interazione.
+  
+  int.eff <- 0
+  
+  for (i in 1:n_int){
+    #cat("\n",i)
+    # i=1
+    
+    ## Primo termine di interazione
+    possible_first <- names(which(var_inter < (nvar_input - 1)))
+    first <- sample(possible_first,1)
+    
+    ## Secondo termine di interazione
+    possible_second <- setdiff(colnames(input), first)
+    possible_second <- setdiff(possible_second,ints[ints[,1] == first,2])
+    possible_second <- setdiff(possible_second,ints[ints[,2] == first,1])
+    second <- sample(possible_second,1)
+    
+    ## Aggiorno la matrice di controllo.
+    ints[i,] <- c(first,second)
+    ## E aggiorno il numero di interazioni per ciascun oggetto.
+    var_inter[names(var_inter) == first] <- var_inter[names(var_inter) == first] + 1
+    var_inter[names(var_inter) == second] <- var_inter[names(var_inter) == second] + 1
+    
+    
+    primo_t <- colnames(input) == first
+    secondo_t <- colnames(input) == second
+    #x=input[1,]
+    int.eff <- int.eff + apply(input,1,function(x) coef.int[i]*x[primo_t]*x[secondo_t] )
+  }
+  
+  cat("\nInteract effects:",coef.int)
+  output <- main.eff + int.eff
+  return(list(output = output,interazioni = ints,singole_int = var_inter))
+
+}
+
+
+## Funzione pre creare l'ultimo dataset problematico
+int.quad.out <- function(input) {
+  
+  ## Interazione
+  int.eff <- interaction.out(input)
+  ## coef.sq sono per la parte quadratica.
+  coef.sq <- runif(ncol(input), min = -5, max = 5)
+  sq.eff <- apply(input,1,function(x) t(as.matrix(x^2))%*%as.matrix(coef.sq))
+  
+  cat("\nSquare effects:",coef.sq)
+  ## Output come funzione dei quadrati e degli effetti principali.
+  output <- int.eff$output + sq.eff
+  return(list(output = output, interazioni = int.eff$interazioni, singole_int = int.eff$singole_int))
+}
+
+
+## Crea il dataset.
+create.data <- function(output,input, daily_obs) {
+  data <- cbind(input,output,rep(1:n_giorni,each=daily_obs))
+  colnames(data)[ncol(data)] <- "Days"
+  return(data)
+}
+
+```
+
+```{r Plot delle relazioni quadratiche}
+## V1 e output
+plot.V1 <- ggplot(data, aes(x = V1, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V1
+
+plot.V2 <- ggplot(data, aes(x = V2, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V2
+
+plot.V3 <- ggplot(data, aes(x = V3, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V3
+
+plot.V4 <- ggplot(data, aes(x = V4, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V4
+
+plot.V5 <- ggplot(data, aes(x = V5, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V5
+
+plot.V6 <- ggplot(data, aes(x = V6, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V6
+
+plot.V7 <- ggplot(data, aes(x = V7, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V7
+
+plot.V8 <- ggplot(data, aes(x = V8, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V8
+
+plot.V9 <- ggplot(data, aes(x = V9, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V9
+
+plot.V10 <- ggplot(data, aes(x = V10, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V10
+
+data.quad
+```
+
+```{r Simulazioni - STAZIONARIETA', nessun cambiamento nel tempo del fenomeno}
+
+## PRIMO DATASET
+## Input indipendenti
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 150
+mu <- rep(0,nvar_input)
+Sigma <- diag(rep(1,nvar_input))
+
+set.seed(4921)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)
+## R2 = 0.81
+
+
+## SECONDO DATASET
+## Input correlati
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 120
+mu <- rep(0,nvar_input)
+
+set.seed(119)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)
+## R2 di 0.80
+
+## TERZO DATASET - effetti quadratici
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 450
+mu <- rep(0,nvar_input)
+
+set.seed(4822)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.quad <- quad.out(input)
+data <- create.data(output.quad,input, daily_obs)
+
+## Controllo varianza spiegata.
+formula.quad <- paste(paste(colnames(input), collapse = " + "),"+",paste0("I(",colnames(input),"^2)", collapse =" + "))
+formula.quad <- paste("output ~",formula.quad)
+
+fit <- lm(formula.quad, data = data[,-ncol(data)])
+summary(fit)  ## 0.808 di R2 del modello originale.
+
+
+
+## TERZOb DATASET -  effetti cubici
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 2500
+mu <- rep(0,nvar_input)
+
+set.seed(88911)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+# var <- runif(nvar_input,min=1, max = 5)
+# var <- diag(var)
+# Sigma <- var%*%Sigma%*%var
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.cubic <- cub.out(input)
+data <- create.data(output.cubic,input, daily_obs)
+
+formula.cub <- paste(paste(colnames(input), collapse = " + "),"+",paste0("I(",colnames(input),"^2)", collapse =" + "))
+formula.cub <- paste(formula.cub, "+", paste0("I(",colnames(input),"^3)", collapse =" + "))
+formula.cub <- paste("output ~",formula.cub)
+
+fit <- lm(formula.cub, data = data[,-ncol(data)])
+summary(fit)   ## 0.80 iniziale.
+fit <- lm(output ~., data = data[,-ncol(data)])   ## 0.47
+
+
+
+## QUARTO DATASET - Interazioni
+
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 300
+mu <- rep(0,nvar_input)
+
+set.seed(1120)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+##int_max <- factorial(nvar_input)/(factorial(2)*factorial(nvar_input-2))
+n_int = 120
+output.int.list <- interaction.out(input)
+data <- create.data(output.int.list$output, input)
+
+##Controllo varianza spiegata.
+formula.int <- paste(paste(colnames(input), collapse = " + "))
+for (i in 1:nrow(output.int.list$interazioni)) {
+  term <- paste0(output.int.list$interazioni[i,], collapse=":")
+  formula.int <- paste(formula.int,"+" ,term)
+}
+formula.int <- paste("output ~",formula.int)
+fit <- lm(formula.int, data = data[,-ncol(data)])
+summary(fit)  ## 0.82 di R2.
+
+
+
+## QUARTOb DATASET - Più interazioni
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 900
+mu <- rep(0,nvar_input)
+
+set.seed(7492)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+##int_max <- factorial(nvar_input)/(factorial(2)*factorial(nvar_input-2))
+n_int = 360
+output.int.list <- interaction.out(input)
+data <- create.data(output.int.list$output,input)
+
+##Controllo varianza spiegata.
+formula.int <- paste(paste(colnames(input), collapse = " + "))
+for (i in 1:nrow(output.int.list$interazioni)) {
+  term <- paste0(output.int.list$interazioni[i,], collapse=":")
+  formula.int <- paste(formula.int,"+" ,term)
+}
+formula.int <- paste("output ~",formula.int)
+fit <- lm(formula.int, data = data[,-ncol(data)])
+summary(fit)  ## 0.81
+
+
+## QUINTO DATASET - Correlazione con il termine d'errore.
+
+nvar_input <- 120
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 200
+mu <- rep(0,nvar_input)
+
+set.seed(4093)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input)
+## Escludiamo 20 variabili
+X <- setdiff(colnames(input), sample(colnames(input),floor(0.3*nvar_input)))
+fit <- lm(output~., data = data[,-ncol(data)])
+fit <- lm(output~., data = data[,c(X,"output")])  ## 0.83 R2.
+summary(fit)
+
+
+
+## SETTIMO - correlazione ed interazione con la componente di errore.
+nvar_input <- 120
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 150
+mu <- rep(0,nvar_input)
+
+set.seed(3995)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+n_int = 120
+output.int.list <- interaction.out(input)
+data <- create.data(output.int.list$output, input)
+
+X <- setdiff(colnames(input), sample(colnames(input),floor(0.3*nvar_input)))
+setdiff(colnames(input),X)
+
+fit <- lm(output~., data = data[,c(X,"output")])  ## 0.49 R2, con solo un sottoinsieme delle variabili.
+summary(fit)
+
+##Controllo varianza spiegata dalle variabili rese disponibili.
+formula.int <- paste(X, collapse = " + ")
+selected.int <- output.int.list$interazioni
+for (i in 1:nrow(output.int.list$interazioni)) {
+  term <- paste0(output.int.list$interazioni[i,], collapse=":")
+  formula.int <- paste(formula.int,"+" ,term)
+}
+formula.int <- paste("output ~",formula.int)
+fit <- lm(formula.int, data = data[,-ncol(data)])   ## 0.91 di R2, con tutte le variabili nel modello e tutte le interazioni.
+
+
+
+
+## SESTO DATASET - Variabili di disturbo
+
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 150
+mu <- rep(0,nvar_input)
+
+set.seed(6589)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+disturbo <- sample(colnames(input),floor(0.25*nvar_input))
+output.lin <- lin.out(input[,setdiff(colnames(input),disturbo)])
+data <- create.data(output.lin,input)
+## Escludiamo 20 variabili
+fit <- lm(output~., data = data[,-ncol(data)])
+fit <- lm(output~., data = data[,c(setdiff(colnames(input),disturbo),"output")])  ## 0.80 circa di R2.
+summary(fit)
+
+
+
+
+## SESTOb DATASET - Più variabili di disturbo
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 90
+mu <- rep(0,nvar_input)
+
+set.seed(43223)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+disturbo <- sample(colnames(input),floor(0.50*nvar_input))
+output.lin <- lin.out(input[,setdiff(colnames(input),disturbo)])
+data <- create.data(output.lin,input)
+## Escludiamo 20 variabili
+fit <- lm(output~., data = data[,-ncol(data)])
+fit <- lm(output~., data = data[,c(setdiff(colnames(input),disturbo),"output")])
+summary(fit)  ## 0.80 R2.
+
+
+
+## OTTAVO DATASET - Outliers
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 120
+mu <- rep(0,nvar_input)
+
+set.seed(2377)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+
+## outliers
+sd <- sd(output.lin)
+num.out <- floor(length(output.lin)*0.01)  ## 182 outliers, 1 osservazione su 100.
+ind <- sample(1:length(output.lin), num.out, replace=FALSE )
+output.lin[ind] <- (abs(output.lin[ind]) + 3*sd) * sign(output.lin[ind])
+
+data <- create.data(output.lin,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)  ## 0.75 R2, si è ridotto per via degli outliers, da 0.82 iniziale.
+
+
+## NONO DATASET - Più outliers
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 120
+mu <- rep(0,nvar_input)
+
+set.seed(2377)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+
+## outliers
+sd <- sd(output.lin)
+num.out <- floor(length(output.lin)*0.05)  ## 900 circa outliers, 1 osservazione su 100.
+ind <- sample(1:length(output.lin), num.out, replace=FALSE )
+output.lin[ind] <- (abs(output.lin[ind]) + 3*sd) * sign(output.lin[ind])
+
+data <- create.data(output.lin,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)     ## 0.61 R2.
+
+
+
+
+## DECIMO DATASET - Sparsità delle feature
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+noise_Sigma <- 20       ## Non so se mi convince questo
+mu <- rep(0,nvar_input)
+
+set.seed(751)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+## Renderle sparse
+sparse <- 0.95
+for (h in 1:ncol(input)) {
+  input[sample(1:nrow(input),floor(nrow(input)*sparse)),h] <- 0
+}
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input)
+
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)  ## 0.63 R2.
+
+
+
+## UNDICESIMO DATASET - Pochi dati
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 2
+noise_Sigma <- 180
+mu <- rep(0,nvar_input)
+
+set.seed(60012)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input)
+
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)     ## R2 iniziale di 0.82
+
+
+## DODICESIMO DATASET - ancora meno dati
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 1
+noise_Sigma <- 280
+mu <- rep(0,nvar_input)
+
+set.seed(1262)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input)
+
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)   ## 0.82 R2.
+
+
+## TREDICESIMO DATASET - meno dati + relazione più complessa.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 1
+noise_Sigma <- 600
+mu <- rep(0,nvar_input)
+
+set.seed(44924)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.quad <- quad.out(input)
+data <- create.data(output.quad,input, daily_obs)
+
+## Controllo varianza spiegata.
+formula.quad <- paste(paste(colnames(input), collapse = " + "),"+",paste0("I(",colnames(input),"^2)", collapse =" + "))
+formula.quad <- paste("output ~",formula.quad)
+
+fit <- lm(formula.quad, data = data[,-ncol(data)])
+summary(fit)  ## 0.8 R2.
+
+
+
+
+## DATASET PROBLEMI - Relazioni quadratiche + interazioni + outliers + correlazione e interazione con l'errore + variabili di disturbo.
+nvar_input <- 120
+n_giorni <- 1825
+daily_obs <- 10
+n_int = 120
+noise_Sigma <- 1       
+mu <- rep(0,nvar_input)
+set.seed(8099)
+
+Sigma <- get_Sigma(nvar_input)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma$mat))
+
+vars <- colnames(input)
+disturbo <- sample(vars, floor(nvar_input*0.2))
+errore <- sample(setdiff(vars,disturbo),floor(nvar_input*0.15))
+X <- setdiff(vars, errore)
+
+output <- int.quad.out(input[,setdiff(vars,disturbo)])
+
+## Performance modello
+formula <- paste(paste(X, collapse = " + "),"+",paste0("I(",X,"^2)", collapse =" + "))
+formula <- paste("output ~",formula)
+
+for (i in 1:nrow(output$interazioni)) {
+  if((output$interazioni[i,1]  %in% X) & (output$interazioni[i,2] %in% X)) {
+    term <- paste0(output$interazioni[i,], collapse=":")
+    formula <- paste(formula,"+" ,term)
+  }
+}
+
+
+# aggiunta degli outliers
+output <- add.outliers(output$output, freq = 0.01)
+data <- create.data(output,input,daily_obs)
+
+
+fit <- lm(formula, data=data[,X])
+summary(fit)  ## Circa 0.78.
+
+
+
+```
+
+```{r Simulazioni - Funzioni per le variazioni stazionarie}
+
+## 
+noise.ARMA <- function(n, coefAR, coefMA, d, sd) {
+  arima.sim(n = n, list(order = c(length(coefAR), d, length(coefMA)),ar = coefAR, ma = coefMA), sd = sd)
+}
+
+## L'oggetto di cui fare il plot.
+noiseARMA.plot <- function(noise, p =1, q=0) {
+  par(mfrow=c(3,1))
+  plot(x = 1:length(noise), y = noise, ylab="", xlab="giorni", type ="l")
+  title(paste0("Grafico dell'errore ARMA(",p,",",q,")"))
+  acf(noise, lag.max=length(noise)/4)
+  pacf(noise,lag.max=length(noise)/4)
+}
+
+## Somma l'errore ottenuto dal modello ARMA (giornaliero) ad un errore WN.
+noise.WN <- function(n) {
+  rnorm(n = n_giorni*daily_obs, mean = 0, sd = sd_WN)
+}
+
+## Plotta l'output e le componenti dell'errore.
+allNoise.plot <- function(noiseARMA, noiseWN, output) {
+  par(mfrow=c(3,1))
+  plot(1:length(noiseARMA),noiseARMA,ylab="", xlab="giorni", type="l")
+  title("Processo ARMA per l'errore")
+  plot(1:length(noiseWN),noiseWN,ylab="", xlab="giorni", type="l")
+  title("Processo WN da aggiungere all'errore")
+  plot(1:length(output),output,ylab="", xlab="giorni", type="l")
+  title("Output senza errore")
+}
+
+## Output funzione lineare
+lin.out <- function(input) {
+  ## coef[1] è l'intercetta, il resto i coefficienti.
+  coef <- runif(ncol(input) + 1, min = -5, max = 5)
+  output <- apply(input,1,function(x) coef[1] + t(as.matrix(x))%*%as.matrix(coef[2:length(coef)]))
+  cat("\nMain effects: ",coef)
+  output <- output
+  return(output)
+}
+
+create.data <- function(output, input) {
+  data <- cbind(input,output,rep(1:n_giorni,each=daily_obs))
+  colnames(data)[ncol(data)] <- "Days"
+  return(data)
+}
+
+```
+
+```{r Simulazioni STAZIONARIETA ma variazioni nel tempo}
+
+## Processo ARMA giornaliero nell'errore + errore specifico.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(50)
+sd_noiseARMA <- sqrt(85)
+mu <- rep(0,nvar_input)
+Sigma <- diag(rep(1,nvar_input))
+
+set.seed(3633)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output <- lin.out(input)
+
+## Per sporcare l'output, processo stazionario giornaliero.
+noiseARMA <- noise.ARMA(n = n_giorni, coefAR = c(0.6), coefMA = c(0), d=0, sd=sd_noiseARMA)
+noiseARMA.plot(noiseARMA, p = 1, q = 0)
+
+## Per aggiungere degli errori all'interno della giornata.
+noiseWN <- noise.WN(n_giorni*daily_obs) 
+noiseTOT <- rep(noiseARMA,each=daily_obs) + noiseWN
+
+allNoise.plot(noiseARMA, noiseWN, output)
+
+output.final <- output + noiseTOT
+
+data <- create.data(output.final,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)   ## 0.8 R2
+
+
+
+
+## Processo stagionale nella componente di errore.
+#https://stats.stackexchange.com/questions/125946/generate-a-time-series-comprising-seasonal-trend-and-remainder-components-in-r
+## 3 componenti: latent seasonal, latent drift, latent level. Sommano alla serie osservata.
+# Latent drift: Beta_t = Beta_t-1 + gugma_t
+# Latent seasonality: Gamma_t = - Gamma_t-1 - ..... - Gamma_t-s + omega_t
+# Latent level: Mu_t = Mu_t-1 + Beta_t-1 + epsilon_t
+
+## Uso questo rispetto ad un modello SARIMA perché ho osservazioni giornaliere, e la simulazione deve essere stagionale di mese in mese.
+
+## Latent drift non è necessario, perchè vorrei un comportamento stazionario.
+## Andamento stagionale, frequenza 12 mesi, 30 giorni per mese.
+set.seed(5787)
+Gamma <- noise.ARMA(n = 12, coefAR = c(0.5), coefMA = c(0), d=0, sd =10)
+plot(Gamma,type="l")
+
+## Questi sono i primi, poi abbiamo le perturbazioni.
+n_mesi <- n_giorni/30
+for (j in (12+1):ceiling(n_mesi)) {
+  
+}
+
+
+```
+
+```{r Simulazioni - DATA DRIFT}
+
+```
+
+
+```{r Parametri degenerazione}
+## Parametri degenerazione
+nsets <- 4
+retrain <- 60  ## Multiplo di 3
+
+max_t0 <- 365
+finestra <- 30
+mse_window = 60
+
+## 1006 giorni per studiare la degenerazione.
+max_dt <- max(data$Days) - (364 + max_t0) - finestra - mse_window
+
+## Giorni ai quali stimare i modelli.
+days_selected <- seq(365,365+max_t0, by = 3)
+```
+
+
+## Ridge
+```{r CV Ridge}
+
+ridge_estimates <- function(training, train_set, test_set, lambda) {
+  
+  tmp_ridge <- glmnet(x = training[train_set,-c(days.pos,out.pos)], y = training[train_set,out.pos],alpha = 0, lambda = lambda)
+    
+  pred_ridge = predict(tmp_ridge, newx=training[test_set,-c(days.pos,out.pos)])
+  errori_ridge = apply((training[test_set, out.pos] - pred_ridge)^2,2,mean)
+    
+  return(errori_ridge)
+}
+
+cv_ridge <- function(training, nsets, lambda, time_wise) {
+  
+  if(time_wise == FALSE) {
+   order <- sample(1:nrow(training),nrow(training)) 
+  }
+  
+  errori_ridge <- matrix(NA,nrow=nsets, ncol=length(lambda))
+  
+  #Inizia il ciclo per ogni subset.
+  for (i in 1:nsets) {
+    #i = 5
+    if(time_wise == TRUE) {
+      
+      dim_subset = floor(nrow(training)/(nsets+1))
+      train_set <- 1:(i*dim_subset)
+      test_set <- (i*dim_subset + 1):((i+1)*dim_subset)  ## Blocco successivo.
+      
+    }
+    if(time_wise == FALSE) {
+      
+      dim_subset = floor(nrow(training)/nsets)
+      test_set <- ((i-1)*dim_subset + 1):(i*dim_subset)
+      train_set <- order[-test_set]
+      test_set <- order[test_set]
+    }
+    
+    cat("\n",i,": ")
+    errori_ridge[i,] <- ridge_estimates(training, train_set, test_set, lambda)
+  }
+
+  return(errori_ridge)
+}
+
+```
+
+```{r Degenerazione del modello ridge - Oggetti}
+## Test degenerazione.
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Se input correlati agli output
+#X <- setdiff(X, sample(X,5))
+
+## Valori della degenerazione.
+results <- matrix(NA,nrow = max_t0 + 1, ncol = max_dt)
+colnames(results) <- paste0("dt: ",seq(1:max_dt))
+rownames(results) <- seq(0:(max_t0))
+
+##Caratteristiche dei modelli
+models.attr <- matrix(NA,nrow = max_t0 + 1, ncol = 3)
+rownames(models.attr) <- seq(0:(max_t0))
+colnames(models.attr) <- c("R2","Lambda use","MSE a t0")
+
+```
+
+```{r Prova ridge primi anni}
+## Prova sul primo anno.
+anno1 <- data$Days <= 365
+
+## Chiaramente qui seleziona il lambda più piccolo, perchè il modello è effettivamente lineare. 
+cv.ridge <- cv.glmnet(x = as.matrix(data[anno1,X]), y = data[anno1,"output"],lambda = lambda, nfolds = 10, alpha = 0)
+cv.ridge$glmnet.fit
+
+
+## Provo ridge_estimates.
+data_x <- as.matrix(data[,c(X,"Days","output")])
+#training = data_x[anno1,]
+
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+
+i = 365
+train <- data$Days <= i & data$Days > i - 365
+test <- data$Days > i & data$Days <= i + 100
+
+errori <- ridge_estimates(data_x,train,test,lambda=lambda)
+which.min(errori)
+
+## Anno 2
+anno2 <- data$Days > 365 & data$Days <= 365*2
+cv.ridge1 <- cv.glmnet(x = data_x[anno2,-c(days.pos,out.pos)], y = data_x[anno2,out.pos],lambda = lambda, nfolds = 10, alpha = 0)
+cv.ridge1$glmnet.fit
+
+nsets
+cv.ridge2 <- cv_ridge(training = data_x[anno2,],nsets,lambda,time_wise = TRUE)
+which.min(apply(cv.ridge2,2,mean))
+lambda[26]
+
+## Sostanzialmente lo stesso lambda
+
+```
+
+```{r Degenerazione del modello ridge - Ciclo}
+
+data_x <- as.matrix(data[,c(X,"Days","output")])
+
+#training = data_x[anno1,]
+#colnames(data_x)
+
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+
+## Griglia di Lambda da usare
+lambda = 10^seq(2, -5, length=150)
+## Per modello con interazione
+lambda = 10^seq(4, -1, length=200)
+lambda.use <- NA
+nsets = 4
+
+days_selected <- seq(365,365+max_t0, by = 3)
+set.seed(20024)
+for (i in days_selected) {
+  ## Quali osservazioni per stimare il modello
+  #i = 365
+  train <- (data_x[,days.pos] >= (i - 364) & data_x[,days.pos] <= i)
+  
+  ## Quale parametro usare per la regolazione
+  ## Se siamo in un multiplo di 15
+  if(((i - 365) %% retrain) == 0) {
+    
+    m.ridge.cv <- cv_ridge(training = data_x[train,], nsets = nsets, lambda = lambda, time_wise = TRUE)
+    lambda.use <- lambda[which.min(apply(m.ridge.cv,2,mean))]
+  }
+  
+  m.ridge <- glmnet(x = data_x[train,-c(days.pos,out.pos)],y = data_x[train,out.pos], alpha = 0, lambda = lambda.use, family = "gaussian")
+  
+  
+  ## MSE A T0 originale
+   # t0_train <- (data_x[,days.pos] >= (i - finestra) & data_x[,days.pos] <= i)
+   # fits.t0 <- predict(m.ridge, newx = data_x[t0_train,-c(days.pos,out.pos)])
+   # mse.t0 <- mean((fits.t0 - data_x[t0_train,out.pos])^2)
+  ## ABBIAMO IL MODELLO
+  
+  ## Mse a t0 con finestra successiva
+   t0_train <- (data_x[,days.pos] > i & data_x[,days.pos] <= (i + mse_window))
+   fits.t0 <- predict(m.ridge, newx = data_x[t0_train,-c(days.pos,out.pos)])
+   mse.t0 <- mean((fits.t0 - data_x[t0_train,out.pos])^2)
+  
+  
+  ## Salviamo i valori di lambda
+  models.attr[i - 364,2] <- lambda.use
+  models.attr[i - 364,3] <- mse.t0
+   
+   ## R2 di training
+  fits <- predict(m.ridge, newx = data_x[train,-c(days.pos,out.pos)])
+  SSE <- sum((fits - data_x[train,out.pos])^2)
+  DEV <- sum((data_x[train,out.pos] - mean(data_x[train,out.pos]))^2)
+  models.attr[i - 364,1] <- 1 - SSE/DEV
+  
+  ## Adesso le prestazioni.
+  ## Previsioni del modello
+  for_fits <- data_x[,days.pos] >= (i + mse_window + 1) & data_x[,days.pos] < (i + mse_window + max_dt + finestra)
+  to_predict <- data_x[for_fits,out.pos]
+  to_predict_X <- data_x[for_fits,-c(days.pos,out.pos)]
+  
+  ## Mi salvo anche i giorni.
+  days_to_use <- data_x[for_fits,days.pos]
+  
+  ##Tutte le previsioni da i + 1 fino a i + 765, finestra poi di 30
+  fits <- predict(m.ridge, newx = to_predict_X)
+  
+  ## Finestre mobili
+  for (j in 1:max_dt) {
+    #j = 1131
+    ## Il vettore di previsioni ha una certa lunghezza.
+    test <- (days_to_use >= (i + j + mse_window) & days_to_use < (i + j + mse_window + finestra))
+    mse <- mean((to_predict[test] - fits[test])^2)
+    
+    results[i-364,j] <- mse
+  }
+  
+  print(((i - 364)/(1 + max_t0))*100)
+}
+
+models.attr.ridge <- models.attr
+results.ridge <- results
+#models.attr
+#lambda
+
+
+```
+
+```{r Plot modello Ridge}
+
+ridge_plot <- function(models.attr, results, title) {
+  
+  ## Dataframed
+  res.for.plot <- as.data.frame(t(results))
+  res.for.plot$dt <- as.numeric(gsub("dt: ","",rownames(res.for.plot)))
+  rownames(res.for.plot) <- NULL
+  
+  ## Togliamo 
+  res.scale.for.plot <- res.for.plot
+
+  ## Dividiamo gli MSE assoluti per renderli relativi.
+  for (i in 1:nrow(models.attr)) {
+    res.scale.for.plot[,i] <- res.scale.for.plot[,i]/models.attr[i,3]   ## Dividiamo per MSE a t0
+  }
+
+  ## Calcoliamo i quantili
+  qt <- matrix(NA, nrow = max_dt, ncol = 4)
+  colnames(qt) <- c("q25","q50","q75","dt")
+  rownames(qt) <- 1:max_dt
+
+  ## Popoliamo la matrice con i quantili
+  for (i in 1:max_dt) {
+    qt[i,] <- c(quantile(as.numeric(res.scale.for.plot[i,-ncol(res.scale.for.plot)]), probs = c(0.25,0.5,0.75)),i)
+  }
+  qt.for.plot <- as.data.frame(qt)
+
+  ## Proviamo a plottare.
+
+  ## Abbiamo bisogno dei singoli punti.
+  res.scale.for.plot1 <- res.scale.for.plot[,c(1,ncol(res.scale.for.plot))]
+  colnames(res.scale.for.plot1) <- c("values","dt")
+
+
+  for (i in 2:(ncol(res.scale.for.plot)-1)) {
+    tmp.df <- as.matrix(res.scale.for.plot[,c(i,ncol(res.scale.for.plot))])
+    colnames(tmp.df) <- c("values","dt")
+    res.scale.for.plot1 <- rbind(res.scale.for.plot1,tmp.df)
+  }
+  
+  plot <- ggplot(data = res.scale.for.plot1, aes(x = dt, y = values)) + geom_point(stat="identity", col = blu_points, size = 0.8) +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q25), color = "yellow") +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q50), color = "black") +
+  geom_line( data=qt.for.plot, mapping = aes(x = dt, y = q75), color = "red") +
+  ylab("MSE Relativo") + xlab("dT, days after trained") + ggtitle(title)
+  
+  return(plot)
+
+}
+```
+
+```{r Plot degenerazione ridge}
+
+## Facciamolo trasparente.
+blu_points <- rgb(198,219,239, max = 255, alpha=60)
+
+ridge.plot <- ridge_plot(models.attr, results, "Modello Ridge - Input incorrelati")
+ridge.plot
+
+```
+
+
+
+
+
+
+## Random Forest
+```{r CV Random Forest}
+rf_estimates <- function(training, train_set, test_set, reg.grid) {
+  
+  numCores <- detectCores()
+  cl <- makeCluster(numCores - 2)
+  clusterExport(cl, c("X"))
+  registerDoParallel(cl)
+  
+  r <- foreach (j = 1:nrow(reg.grid), .packages = "ranger") %dopar%  {
+    
+    tmp_rf <- ranger(output ~ .,
+              data=training[train_set,],
+              num.tree = reg.grid[j,1],
+              importance = "impurity",
+              mtry = reg.grid[j,2])
+    
+    test.fit <- mean((training[test_set,"output"] - predict(tmp_rf,training[test_set,X])$prediction)^2)
+    
+    list(errori = test.fit)
+  }
+  
+  stopCluster(cl)
+  
+  errori <- rep(NA,nrow(reg.grid))
+  
+  for(i in 1:nrow(reg.grid)) {
+    errori[i] <- r[[i]]$errori
+  }
+  
+  return(errori)
+
+}
+
+cv.rf <- function(training, nsets, reg.grid, time_wise) {
+  
+  if(time_wise == FALSE) {
+   order <- sample(1:nrow(training),nrow(training)) 
+  }
+  
+  errori_rf <- matrix(NA,nrow=nsets, ncol=nrow(reg.grid))
+  
+  #Inizia il ciclo per ogni subset.
+  for (i in 1:nsets) {
+    
+    if(time_wise == TRUE) {
+      
+      dim_subset = floor(nrow(training)/(nsets+1))
+      train_set <- 1:(i*dim_subset)
+      test_set <- (i*dim_subset + 1):((i+1)*dim_subset)  ## Blocco successivo.
+      
+    }
+    if(time_wise == FALSE) {
+      
+      dim_subset = floor(nrow(training)/nsets)
+      test_set <- ((i-1)*dim_subset + 1):(i*dim_subset)
+      train_set <- order[-test_set]
+      test_set <- order[test_set]
+    }
+    
+    cat("\n",i,": ")
+    errori_rf[i,] <- rf_estimates(training, train_set, test_set, reg.grid)
+  }
+
+  return(errori_rf)
+}
+
+```
+
+```{r Degenerazione del modello RF - Oggetti}
+
+## DATI
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Se input correlati agli output
+#X <- setdiff(X, sample(X,5))
+
+data_x <- data[,c(X,"Days","output")]
+#training = data_x[anno1,]
+#colnames(data_x)
+
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+
+
+## Valori della degenerazione.
+results <- matrix(NA,nrow = max_t0 + 1, ncol = max_dt)
+colnames(results) <- paste0("dt: ",seq(1:max_dt))
+rownames(results) <- seq(0:(max_t0))
+
+##Caratteristiche dei modelli
+models.attr <- matrix(NA,nrow = max_t0 + 1, ncol = 4)
+rownames(models.attr) <- seq(0:(max_t0))
+colnames(models.attr) <- c("R2","NumTrees","Mtry","MSE a t0")
+
+
+## Griglia
+mtry <- seq(31,67, by =6)
+num.trees <- seq(100,340, by = 60)
+reg.grid <- expand.grid(num.trees,mtry)
+colnames(reg.grid) <- c("Num trees","mtry")
+
+
+```
+
+```{r Degenerazione Random Forest - Regolazione}
+
+regulated <- c()
+mse <- list()
+#max_t0 <- 45
+
+k = 0
+
+system.time(for (i in 365:(365+max_t0)) {
+  
+  if((i - 365) %% retrain == 0) {
+    
+    k = k + 1
+    cat("\nRegolazione numero:",k)
+    
+    data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+    
+    output <- cv.rf(data_x[data_to_use,-days.pos], nsets, reg.grid,time_wise = TRUE)
+    
+    # Salvo gli alberi.
+    mse[[k]] <- output
+    
+    mse_medi <- apply(output,2,mean)
+    
+    ##Elemento ottimale della griglia.
+    opt <- which.min(mse_medi)
+    regulated <- rbind(regulated, c(i,opt, as.numeric(reg.grid[opt,])))
+    
+    ## Salviamo i parametri del modello.
+    
+  }
+})
+
+colnames(regulated) <- c("Numero","Optimal","Trees","Mtry")
+## La regolazione impiega 1930 per 10 reg. 30 minuti
+regulated.rf <- regulated
+
+## Seleziona sempre 49 mtry. Posso ridurre la griglia.
+```
+
+```{r Degenerazione del Random Forest - Ciclo}
+#load("C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/piu_INTERAZIONE/regulated.rf")
+regulated <- regulated.rf
+
+mtry_use <- NA
+numTrees_use <- NA
+
+## Riduco il numero di modelli da stimare ad un terzo.
+days_selected <- seq(365,365+max_t0, by = 3)
+numCores <- detectCores()
+cl <- makeCluster(numCores - 1)
+registerDoParallel(cl)
+set.seed(576)
+r <- foreach (i = days_selected, .packages = "ranger") %dopar% {
+  #
+  
+  ## Dati da usare
+  data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+  
+  ## Aggiorniamo la struttura.
+  reg_to_use <- sum(i >= regulated[,1])
+  opt <- regulated[reg_to_use,2]
+  
+  m.rf <- ranger(output ~ . ,
+              data=data_x[data_to_use,c(X,"output")],
+              num.tree = reg.grid[opt,1],
+              importance = "impurity",
+              mtry = reg.grid[opt,2])
+  
+  ## R2.
+  fits.rf <- predict(m.rf,data_x[data_to_use,X])$prediction
+  SSE <- sum((data_x[data_to_use,out.pos] - fits.rf)^2)
+  DEV <- sum((data_x[data_to_use,out.pos] - mean(data_x[data_to_use,out.pos]))^2)
+
+  R2 <- 1 - SSE/DEV
+  
+  ## MSE a t0 mse_window.
+  t0_train <- (data_x[,days.pos] > i & data_x[,days.pos] <= (i + mse_window))
+  fits.t0 <- predict(m.rf, data_x[t0_train,-c(days.pos,out.pos)])$prediction
+  mse.t0 <- mean((fits.t0 - data_x[t0_train,out.pos])^2)
+  
+  ## Previsioni del modello
+  for_fits <- data_x[,days.pos] >= (i + mse_window + 1) & data_x[,days.pos] < (i + mse_window + max_dt + finestra)
+  to_predict <- data_x[for_fits,out.pos]
+  to_predict_X <- data_x[for_fits,-c(days.pos,out.pos)]
+  
+  ## Mi salvo anche i giorni.
+  days_to_use <- data_x[for_fits,days.pos]
+  
+  ##Tutte le previsioni da i + 1 fino a i + max_dt, finestra poi di finestra
+  fits <- predict(m.rf, to_predict_X)$prediction
+  
+  prestazioni <- rep(NA,max_dt)
+  for (j in 1:max_dt) {
+
+    test <- (days_to_use >= (i + j + mse_window) & days_to_use < (i + j + mse_window + finestra))
+    mse <- mean((to_predict[test] - fits[test])^2)
+    
+    prestazioni[j] <- mse
+  }
+  
+  list(R2 = R2, optimal = opt, mse_t0 = mse.t0, prestazioni = prestazioni, mtry = reg.grid[opt,2], numTrees =reg.grid[opt,1])
+}
+stopCluster(cl)
+
+r[[1]]
+## 
+
+for (j in 1:length(days_selected)) {
+  models.attr[days_selected[j] - 364,"R2"] <- r[[j]]$R2
+  models.attr[days_selected[j] - 364,"NumTrees"] <- r[[j]]$numTrees
+  models.attr[days_selected[j] - 364,"MSE a t0"] <- r[[j]]$mse_t0
+  models.attr[days_selected[j] - 364,"Mtry"] <- r[[j]]$mtry
+  results[days_selected[j] - 364,] <- r[[j]]$prestazioni
+}
+
+models.attr.rf <- models.attr
+results.rf <- results
+#models.attr
+
+plot(results.rf[364,])
+```
+
+```{r Plot modello RF}
+rf_plot <- function(models.attr, results, title) {
+  
+  ## Dataframed
+  res.for.plot <- as.data.frame(t(results))
+  res.for.plot$dt <- as.numeric(gsub("dt: ","",rownames(res.for.plot)))
+  rownames(res.for.plot) <- NULL
+  
+  ## Togliamo 
+  res.scale.for.plot <- res.for.plot
+
+  ## Dividiamo gli MSE assoluti per renderli relativi.
+  for (i in 1:nrow(models.attr)) {
+    res.scale.for.plot[,i] <- res.scale.for.plot[,i]/models.attr[i,4]   ## Dividiamo per MSE a t0
+  }
+
+  ## Calcoliamo i quantili
+  qt <- matrix(NA, nrow = max_dt, ncol = 4)
+  colnames(qt) <- c("q25","q50","q75","dt")
+  rownames(qt) <- 1:max_dt
+
+  ## Popoliamo la matrice con i quantili
+  for (i in 1:max_dt) {
+    qt[i,] <- c(quantile(as.numeric(res.scale.for.plot[i,-ncol(res.scale.for.plot)]), probs = c(0.25,0.5,0.75)),i)
+  }
+  qt.for.plot <- as.data.frame(qt)
+
+  ## Proviamo a plottare.
+
+  ## Abbiamo bisogno dei singoli punti.
+  res.scale.for.plot1 <- res.scale.for.plot[,c(1,ncol(res.scale.for.plot))]
+  colnames(res.scale.for.plot1) <- c("values","dt")
+
+
+  for (i in 2:(ncol(res.scale.for.plot)-1)) {
+    tmp.df <- as.matrix(res.scale.for.plot[,c(i,ncol(res.scale.for.plot))])
+    colnames(tmp.df) <- c("values","dt")
+    res.scale.for.plot1 <- rbind(res.scale.for.plot1,tmp.df)
+  }
+  
+  plot <- ggplot(data = res.scale.for.plot1, aes(x = dt, y = values)) + geom_point(stat="identity", col = blu_points, size = 0.8) +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q25), color = "yellow") +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q50), color = "black") +
+  geom_line( data=qt.for.plot, mapping = aes(x = dt, y = q75), color = "red") +
+  ylab("MSE Relativo") + xlab("dT, days after trained") + ggtitle(title)
+  
+  return(plot)
+
+}
+
+```
+
+```{r Plot degenerazione Random Forest}
+blu_points <- rgb(198,219,239, max = 255, alpha=20)
+
+rf.plot <- rf_plot(models.attr, results, "Modello RF - Input incorrelati")
+rf.plot
+
+```
+
+
+
+## Gradient boosting
+```{r CV Gradient Boosting}
+
+  tree.num <- function(shrink, depth) {
+    
+    #trees = 3000
+    ## Se interazione 8000
+    trees = 12000
+    
+    if(depth == 1) trees = trees*2.5
+    if(depth == 2) trees = trees*1.8
+    if(depth ==3) trees = trees*1.5
+    if(depth>=4) trees = trees*1.2
+    
+    return(trees)
+  }
+
+gb_estimates_par <- function(training, train_set, test_set, reg.grid) {
+  
+  tree.num <- function(shrink, depth) {
+    
+    #trees = 3000
+    ## Se interazione 8000
+    trees = 12000
+    
+    if(depth == 1) trees = trees*2.5
+    if(depth == 2) trees = trees*1.8
+    if(depth ==3) trees = trees*1.5
+    if(depth>=4) trees = trees*1.2
+    
+    return(trees)
+  }
+  
+  cl <- makeCluster(8)
+  registerDoParallel(cl)
+  
+  r <- foreach (j = 1:nrow(reg.grid), .packages = "gbm") %dopar%  {
+    
+    num.tree <- tree.num(shrink = reg.grid[j,2], depth =reg.grid[j,1])
+    
+    tmp_gb <- gbm(output~., data = training[train_set,], distribution = "gaussian",
+                  n.trees = num.tree,
+                  interaction.depth = reg.grid[j,1], shrinkage = reg.grid[j,2] )
+    
+    test.fit <- predict(tmp_gb, newdata = training[test_set,-ncol(training)], n.trees=1:num.tree)
+    
+    mses <- apply(test.fit, 2, function (pred) mean((training[test_set,"output"] - pred)^2))
+    
+    list(errori = mses[which.min(mses)], alberi = round(which.min(mses)/num.tree,2))
+  }
+  
+  stopCluster(cl)
+  
+  
+  errori <- rep(NA,nrow(grid))
+  alberi <- rep(NA,nrow(grid))
+  for(i in 1:nrow(grid)) {
+    errori[i] <- r[[i]]$errori
+    alberi[i] <- r[[i]]$alberi
+  }
+  risultati_list <- list(Errori = errori, Num_Alberi = alberi)
+  return(risultati_list)
+}
+
+
+cv_gb <- function(training, nsets, reg.grid, time_wise) {
+  
+  if(time_wise == FALSE) {
+   order <- sample(1:nrow(training),nrow(training)) 
+  }
+  
+  errori_gb <- matrix(NA,nrow=nsets, ncol=nrow(reg.grid))
+  num_alberi <- matrix(NA,nrow=nsets, ncol=nrow(reg.grid))
+  
+  #Inizia il ciclo per ogni subset.
+  for (i in 1:nsets) {
+    
+    if(time_wise == TRUE) {
+      
+      dim_subset = floor(nrow(training)/(nsets+1))
+      train_set <- 1:(i*dim_subset)
+      test_set <- (i*dim_subset + 1):((i+1)*dim_subset)  ## Blocco successivo.
+      
+    }
+    if(time_wise == FALSE) {
+      
+      dim_subset = floor(nrow(training)/nsets)
+      test_set <- ((i-1)*dim_subset + 1):(i*dim_subset)
+      train_set <- order[-test_set]
+      test_set <- order[test_set]
+    }
+    
+    cat("\n",i,":\n")
+    #estimates <- gb_estimates(training, train_set, test_set, reg.grid)
+    estimates <- gb_estimates_par(training, train_set, test_set, reg.grid)
+    errori_gb[i,] <- estimates$Errori
+    num_alberi[i,] <- estimates$Num_Alberi
+  }
+
+  return(list("results" = errori_gb,"alberi" = num_alberi))
+}
+
+```
+
+```{r Degenerazione del modello GB - Oggetti}
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Se input correlati agli output
+#X <- setdiff(X, sample(X,5))
+
+data_x <- data[,c(X,"Days","output")]
+#training = data_x[anno1,]
+#colnames(data_x)
+
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+
+
+##Valori della degenerazione
+results <- matrix(NA,nrow = max_t0 + 1, ncol = max_dt)
+colnames(results) <- paste0("dt: ",seq(1:(max_dt)))
+rownames(results) <- seq(0:(max_t0))
+
+##Caratteristiche dei modelli
+models.attr <- matrix(NA,nrow = max_t0 + 1, ncol = 4)
+rownames(models.attr) <- seq(0:(max_t0))
+colnames(models.attr) <- c("R2","Grid_opt","MSE a t0","Alberi")
+
+##Griglia
+shrinkage <- c(0.08)
+depths <- 3:6
+grid <- expand.grid(depths,shrinkage)
+colnames(grid) <- c("depth","shrink")
+
+## Regulated contiene i modelli migliori.
+regulated <- c()
+trees <- c()
+mse <- c()
+
+```
+
+```{r Prove Gradient Boosting}
+anno1 <- data$Days <= 365
+
+## Non ha senso regolare lo shrinkage
+system.time(gb.cv <- cv_gb(data_x[anno1,-days.pos], nsets, grid, time_wise =TRUE))
+colnames(gb.cv$alberi) <- round(grid$shrink,3)
+which.min(apply(gb.cv$results,2,mean))
+grid
+## 80 input, 4 core: 137
+## 80 input, 8 core: 99
+## 80 input, 11 core: 89
+grid[which.min(apply(gb.cv$results,2,mean)),]
+
+anno2 <- data$Days > 365 & data$Days <= 365*2
+
+## Proviamo a vedere.
+system.time(risultati <- gb_estimates(training = data_x[,-days.pos], anno1, anno2, grid))  ## 36 secondi
+system.time(risultati2 <- gb_estimates_par(training = data_x[,-days.pos], anno1, anno2, grid)) ## 9.5 secondi
+grid[which.min(risultati$Errori),]
+
+grid[which.min(risultati$Errori),]
+grid[which.min(risultati2_list$Errori),]
+
+## Proviamo cv_gb
+boost.cv <- cv_gb(data_x[anno1, -days.pos], nsets, grid, time_wise =TRUE)
+
+
+## Come fa il modello GB?
+i=365
+data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+data_use <- data_x[data_to_use,]
+train <- sample(1:nrow(data_use), floor(nrow(data_use)*0.85))
+training <- data_use[train,-days.pos]
+validation <- data_use[-train, -days.pos]
+
+num.tree <- tree.num(shrink=0.056, depth=1)
+m.gb <- gbm(output~., data = training, distribution = "gaussian",
+                  n.trees = num.tree,
+                  interaction.depth = 1, shrinkage = 0.56)
+
+test.fit <- predict(m.gb, newdata = validation, n.trees=1:num.tree)
+    
+mses <- apply(test.fit, 2, function (pred) mean((validation[,"output"] - pred)^2))
+mses[which.min(mses)]  ## 136 alberi abbiamo il minimo.
+## 3820 di mse.
+
+fits <- predict(m.gb, newdata = data_use[,X], n.trees=which.min(mses))
+SSE <- sum((fits - data_use$output)^2)
+DEV <- sum((mean(data_use$output) - data_use$output)^2)
+R2 <- 1 - SSE/DEV
+R2   ##0.51 di R2. Non performa molto bene.
+    
+
+```
+
+```{r Regolazione Gradient Boosting}
+
+regulated <- c()
+trees <- c()
+mse <- c()
+
+#max_t0 <- 45
+
+k = 0
+
+for (i in 365:(365+max_t0)) {
+  
+  if((i - 365) %% retrain == 0) {
+    
+    k = k + 1
+    cat("\nRegolazione numero:",k)
+    
+    data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+    
+    output <- cv_gb(data_x[data_to_use,-days.pos], nsets, grid,time_wise = TRUE)
+    
+    # Salvo gli alberi.
+    trees <- rbind(trees,output$alberi)
+    mse <- rbind(mse,output$results)
+    
+    mse_medi <- apply(output$results,2,mean)
+    
+    ##Elemento ottimale della griglia.
+    opt <- which.min(mse_medi)
+    regulated <- rbind(regulated, c(i,opt, as.numeric(grid[opt,])))
+    
+    ## Salviamo i parametri del modello.
+    
+  }
+}
+
+colnames(regulated) <- c("Numero","Optimal","Depth","Shrink")
+regulated.gb <- regulated
+
+
+```
+
+```{r Degenerazione del modello GB - Ciclo}
+
+# load("C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/INTERAZIONE_con_ERRORE/regulated.gb")
+# regulated <- regulated.gb
+regulated  ## Ottenuto da "Regolazione Gradient Boosting"
+days_selected <- seq(365,365+max_t0, by = 3)
+
+numCores <- detectCores()
+cl <- makeCluster(numCores - 1)
+registerDoParallel(cl)
+set.seed(435)
+system.time(
+r <- foreach (i = days_selected, .packages = "gbm") %dopar% {
+  #i = 365
+  ## Dati da usare
+  data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+  
+  ## Aggiorniamo la struttura.
+  reg_to_use <- sum(i >= regulated[,1])
+  
+  ## Creo i training e i test set.
+  data_use <- data_x[data_to_use,]
+  train <- sample(1:nrow(data_use), floor(nrow(data_use)*0.85))
+  training <- data_use[train,-c(days.pos)]
+  testing <- data_use[-train,-c(days.pos)]
+ 
+  opt <- regulated[reg_to_use,2]
+  num.tree <- tree.num(shrink = grid[opt,2], depth = grid[opt,1])
+  m.gb <- gbm(output~., data = training, distribution = "gaussian",
+                  n.trees = num.tree,
+                  interaction.depth = grid[opt,1], shrinkage = grid[opt,2] )
+  
+  ## Errori sul testing, per trovare il modello migliore.
+  test.fit <- predict(m.gb, newdata = testing, n.trees=1:num.tree)
+    
+  mses <- apply(test.fit, 2, function (pred) mean((testing[,"output"] - pred)^2))
+  
+  ##Numero di alberi ottimale.
+  opt_tree <- which.min(mses)
+
+  ## R2.
+  fits.gb <- predict(m.gb,data_use[,-c(days.pos,out.pos)], n.trees=opt_tree)
+  SSE <- sum((data_use[,out.pos] - fits.gb)^2)
+  DEV <- sum((data_use[,out.pos] - mean(data_use[,out.pos]))^2)
+
+  R2 <- 1 - SSE/DEV
+  
+  ##Elemento utilizzato.
+  optimal_used <- regulated[reg_to_use,2]
+  
+  
+  ## MSE a t0.
+  # t0_train <- (hospital_X[,days.pos] >= (i - finestra) & hospital_X[,days.pos] <= i)
+  # fits.t0 <- predict(m.gb, hospital_X[t0_train,-c(days.pos,Wait.pos)], n.trees=opt_tree)
+  # mse.t0 <- mean((fits.t0 - hospital_X[t0_train,Wait.pos])^2)
+  
+  ## MSE a t0 mse_window.
+  t0_train <- (data_x[,days.pos] > i & data_x[,days.pos] <= (i + mse_window))
+  fits.t0 <- predict(m.gb, data_x[t0_train,-c(days.pos,out.pos)], n.trees=opt_tree)
+  mse.t0 <- mean((fits.t0 - data_x[t0_train,out.pos])^2)
+  
+  ## SALVO l'MSE a t0.
+  
+  for_fits <- data_x[,days.pos] >= (i + mse_window + 1) & data_x[,days.pos] < (i + mse_window + max_dt + finestra)
+  to_predict <- data_x[for_fits,out.pos]
+  to_predict_X <- data_x[for_fits,-c(days.pos,out.pos)]
+  
+  ## Mi salvo anche i giorni.
+  days_to_use <- data_x[for_fits,days.pos]
+  
+  ##Tutte le previsioni da i + 1 fino a i + max_dt, finestra poi di finestra
+  fits <- predict(m.gb, to_predict_X, n.trees=opt_tree)
+  
+  ## Finestre mobili
+  
+  prestazioni <- rep(NA,max_dt)
+  for (j in 1:max_dt) {
+
+    test <- (days_to_use >= (i + j + mse_window) & days_to_use < (i + j + mse_window + finestra))
+    mse <- mean((to_predict[test] - fits[test])^2)
+    
+    prestazioni[j] <- mse
+  }
+  
+  list(R2 = R2, optimal = optimal_used,opt_tree = round(opt_tree/num.tree,2), mse_t0 = mse.t0, prestazioni = prestazioni)
+  
+}
+)
+
+stopCluster(cl)
+
+for (j in 1:length(days_selected)) {
+  models.attr[days_selected[j] - 364,"R2"] <- r[[j]]$R2
+  models.attr[days_selected[j] - 364,"Grid_opt"] <- r[[j]]$optimal
+  models.attr[days_selected[j] - 364,"MSE a t0"] <- r[[j]]$mse_t0
+  models.attr[days_selected[j] - 364,"Alberi"] <- r[[j]]$opt_tree
+  results[days_selected[j] - 364,] <- r[[j]]$prestazioni
+}
+
+models.attr.gb <- models.attr
+results.gb <- results
+
+```
+
+```{r Plot modello GB}
+gb_plot <- function(models.attr, results, title) {
+  
+  ## Dataframed
+  res.for.plot <- as.data.frame(t(results))
+  res.for.plot$dt <- as.numeric(gsub("dt: ","",rownames(res.for.plot)))
+  rownames(res.for.plot) <- NULL
+  
+  ## Togliamo 
+  res.scale.for.plot <- res.for.plot
+
+  ## Dividiamo gli MSE assoluti per renderli relativi.
+  for (i in 1:nrow(models.attr)) {
+    res.scale.for.plot[,i] <- res.scale.for.plot[,i]/models.attr[i,3]   ## Dividiamo per MSE a t0
+  }
+
+  ## Calcoliamo i quantili
+  qt <- matrix(NA, nrow = max_dt, ncol = 4)
+  colnames(qt) <- c("q25","q50","q75","dt")
+  rownames(qt) <- 1:max_dt
+
+  ## Popoliamo la matrice con i quantili
+  for (i in 1:max_dt) {
+    qt[i,] <- c(quantile(as.numeric(res.scale.for.plot[i,-ncol(res.scale.for.plot)]), probs = c(0.25,0.5,0.75)),i)
+  }
+  qt.for.plot <- as.data.frame(qt)
+
+  ## Proviamo a plottare.
+
+  ## Abbiamo bisogno dei singoli punti.
+  res.scale.for.plot1 <- res.scale.for.plot[,c(1,ncol(res.scale.for.plot))]
+  colnames(res.scale.for.plot1) <- c("values","dt")
+
+
+  for (i in 2:(ncol(res.scale.for.plot)-1)) {
+    tmp.df <- as.matrix(res.scale.for.plot[,c(i,ncol(res.scale.for.plot))])
+    colnames(tmp.df) <- c("values","dt")
+    res.scale.for.plot1 <- rbind(res.scale.for.plot1,tmp.df)
+  }
+  
+  plot <- ggplot(data = res.scale.for.plot1, aes(x = dt, y = values)) + geom_point(stat="identity", col = blu_points, size = 0.8) +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q25), color = "yellow") +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q50), color = "black") +
+  geom_line( data=qt.for.plot, mapping = aes(x = dt, y = q75), color = "red") +
+  ylab("MSE Relativo") + xlab("dT, days after trained") + ggtitle(title)
+  
+  return(plot)
+
+}
+```
+
+```{r Plot degenerazione Gradient Boosting}
+blu_points <- rgb(198,219,239, max = 255, alpha=20)
+
+gb.plot <- gb_plot(models.attr, results, "Modello GB - Input incorrelati")
+gb.plot
+
+```
+
+
+
+## Rete Neurale
+```{r Funzioni rete neurale}
+
+create_model_l2 <- function(layers, size, input, lambda, seed) {
+  
+  set.seed(seed)
+  seeds <- runif(layers + 1, min = 1000, max = 10000)
+  
+  model <- keras_model_sequential()
+  
+  model %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+                      input_shape = input,
+              kernel_initializer = initializer_random_normal(seed = seeds[1]),
+              kernel_regularizer = regularizer_l2(l = lambda))
+  
+  if (layers >= 2) {
+    for (h in 2:layers) {
+      model %>% layer_dense(name = paste0("Hidden",h),
+                          units = size[h],
+                          activation = "relu",
+                   kernel_initializer = initializer_random_normal(seed = seeds[h]),
+                   kernel_regularizer = regularizer_l2(l = lambda))
+   }
+  }
+  
+  model %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = seeds[layers + 1]))
+  
+  model %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+  
+  return(model)
+}
+
+create_model_l1 <- function(layers, size, input, lambda, seed) {
+  
+  set.seed(seed)
+  seeds <- runif(layers + 1, min = 1000, max = 10000)
+  
+  model <- keras_model_sequential()
+  
+  model %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+                      input_shape = input,
+              kernel_initializer = initializer_random_normal(seed = seeds[1]),
+              kernel_regularizer = regularizer_l1(l = lambda))
+  
+  if (layers >= 2) {
+    for (h in 2:layers) {
+      model %>% layer_dense(name = paste0("Hidden",h),
+                          units = size[h],
+                          activation = "relu",
+                   kernel_initializer = initializer_random_normal(seed = seeds[h]),
+                   kernel_regularizer = regularizer_l1(l = lambda))
+   }
+  }
+  
+  model %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = seeds[layers + 1]))
+  
+  model %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+  
+  return(model)
+}
+
+
+create_model_dropout <- function(layers, size, n_input, dropout, seed) {
+  
+  set.seed(seed)
+  seeds <- runif(layers + 1, min = 1000, max = 10000)
+  
+  model <- keras_model_sequential()
+  
+  model %>% layer_dropout(dropout, input_shape = n_input)
+  
+  model %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+              kernel_initializer = initializer_random_normal(seed = seeds[1])) %>%
+    layer_dropout(dropout)
+  
+  if (layers >= 2) {
+    for (h in 2:layers) {
+      model %>% layer_dense(name = paste0("Hidden",h),
+                          units = size[h],
+                          activation = "relu",
+                   kernel_initializer = initializer_random_normal(seed = seeds[h])) %>%
+        layer_dropout(dropout)
+   }
+  }
+  
+  model %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = seeds[layers + 1]))
+    
+  model %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+  
+  return(model)
+}
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 2,
+                                      verbose = 0)
+
+```
+
+```{r CV Rete Neurale}
+
+nn_estimates_drop_par <- function(training, train_set, test_set, reg.grid, reps, seed) {
+  
+  cl <- makeCluster(8)
+  clusterExport(cl, c("layers","size","X"))
+  registerDoParallel(cl)
+
+  r <- foreach (j = 1:nrow(reg.grid), .packages = c("keras","tensorflow"), .export= c("create_model_dropout")) %dopar%  {
+    
+    models <- epoche <- c(NA, reps)
+    
+    early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                min_delta = 0,
+                                patience = 3,
+                                verbose = 0)
+    
+    for(h in 1:reps) {
+      
+      modello <- create_model_dropout(layers = layers, size = size,length(X), dropout = reg.grid[j,1], seed)
+      
+      storia <- modello %>% fit(x = as.matrix(training[train_set,X]),
+            y = training[train_set,"output"],
+            epochs = 1000,
+            verbose = 0,
+            validation_data = list(as.matrix(training[test_set,X]),training[test_set,"output"]),
+            callbacks = early_stop)
+      
+      models[h] <- storia$metrics$val_mean_squared_error[which.min(storia$metrics$val_mean_squared_error)]
+      epoche[h] <- which.min(storia$metrics$val_mean_squared_error)
+    }
+    
+    
+    ## Serve la replicazione migliore.
+    list(errore = models[which.min(models)], epoche = epoche[which.min(models)])
+  }
+  
+  stopCluster(cl)
+  
+  
+  errori <- epoche <- rep(NA,nrow(grid))
+  
+  for(i in 1:nrow(grid)) {
+    errori[i] <- r[[i]]$errore
+    epoche[i] <- r[[i]]$epoche
+  }
+  
+  risultati_list <- list(Errori = errori, Epoche = epoche)
+  return(risultati_list)
+}
+
+
+nn_estimates_l2_par <- function(training, train_set, test_set, reg.grid, reps, seed) {
+  
+  cl <- makeCluster(8)
+  clusterExport(cl, c("layers","size","X"))
+  registerDoParallel(cl)
+
+  r <- foreach (j = 1:nrow(reg.grid), .packages = c("keras","tensorflow"), .export= c("create_model_l2")) %dopar%  {
+    
+    models <- epoche <- c(NA, reps)
+    
+    early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                min_delta = 0,
+                                patience = 2,
+                                verbose = 0)
+    
+    for(h in 1:reps) {
+      
+      modello <- create_model_l2(layers = layers, size = size, input = length(X), lambda = reg.grid[j,1], seed)
+      
+      storia <- modello %>% fit(x = as.matrix(training[train_set,X]),
+            y = training[train_set,"output"],
+            batch_size = ceiling(length(train_set)/2),
+            epochs = 1000,
+            verbose = 0,
+            validation_data = list(as.matrix(training[test_set,X]),training[test_set,"output"]),
+            callbacks = early_stop)
+      
+      models[h] <- storia$metrics$val_mean_squared_error[which.min(storia$metrics$val_mean_squared_error)]
+      epoche[h] <- which.min(storia$metrics$val_mean_squared_error)
+    }
+    
+    
+    ## Serve la replicazione migliore.
+    list(errore = models[which.min(models)], epoche = epoche[which.min(models)])
+  }
+  
+  stopCluster(cl)
+  
+  
+  errori <- epoche <- rep(NA,nrow(grid))
+  
+  for(i in 1:nrow(grid)) {
+    errori[i] <- r[[i]]$errore
+    epoche[i] <- r[[i]]$epoche
+  }
+  
+  risultati_list <- list(Errori = errori, Epoche = epoche)
+  return(risultati_list)
+}
+
+
+
+cv_nn <- function(training, nsets, reg.grid, time_wise, reps) {
+  
+  if(time_wise == FALSE) {
+   order <- sample(1:nrow(training),nrow(training)) 
+  }
+  
+  errori_nn <- matrix(NA,nrow=nsets, ncol=nrow(reg.grid))
+  num_epoche <- matrix(NA,nrow=nsets, ncol=nrow(reg.grid))
+  
+  #Inizia il ciclo per ogni subset.
+  for (i in 1:nsets) {
+    
+    if(time_wise == TRUE) {
+      
+      dim_subset = floor(nrow(training)/(nsets+1))
+      train_set <- 1:(i*dim_subset)
+      test_set <- (i*dim_subset + 1):((i+1)*dim_subset)  ## Blocco successivo.
+      
+    }
+    if(time_wise == FALSE) {
+      
+      dim_subset = floor(nrow(training)/nsets)
+      test_set <- ((i-1)*dim_subset + 1):(i*dim_subset)
+      train_set <- order[-test_set]
+      test_set <- order[test_set]
+    }
+    
+    cat("\n",i,":\n")
+    #estimates <- nn_estimates_par(training, train_set, test_set, reg.grid, reps, runif(1, min =1000, max=9999))
+    estimates <- nn_estimates_drop_par(training, train_set, test_set, reg.grid, reps, runif(1, min =1000, max=9999))
+    errori_nn[i,] <- estimates$Errori
+    num_epoche[i,] <- estimates$Epoche
+  }
+
+  return(list("results" = errori_nn,"epoche" = num_epoche))
+}
+
+```
+
+```{r Degenerazione Rete Neurale - Oggetti}
+
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Se input correlati agli output
+#X <- setdiff(X, sample(X,5))
+
+data_x <- data[,c(X,"Days","output")]
+#training = data_x[anno1,]
+#colnames(data_x)
+
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+
+##Valori della degenerazione
+results <- matrix(NA,nrow = max_t0 + 1, ncol = max_dt)
+colnames(results) <- paste0("dt: ",seq(1:(max_dt)))
+rownames(results) <- seq(0:(max_t0))
+
+##Caratteristiche dei modelli
+models.attr <- matrix(NA,nrow = max_t0 + 1, ncol = 4)
+rownames(models.attr) <- seq(0:(max_t0))
+colnames(models.attr) <- c("R2","Grid_opt","MSE a t0","Epoche")
+```
+
+```{r Prove Rete Neurale}
+
+## Dati. Devono essere matrici
+anno1 <- data$Days <= 365
+anno2 <- data$Days > 365 & data$Days <= 365*2
+train_x <- as.matrix(data_x[anno1,X])
+train_y <- data_x[anno1,"output"]
+val_x <- as.matrix(data_x[anno2,X])
+val_y <- data_x[anno2,"output"]
+
+##  Costruisco anno1 e anno2.
+tensorflow::set_random_seed(42)
+
+layers <- 3
+size <- c(300,300,300)
+## c(150,150,150) overfitta sul dataset con 80 input.
+
+s <- floor(runif(1, min = 1000, max = 9999))
+s
+modello <- create_model_l1(layers = layers, size = size, input = length(X), lambda = 3.5, seed = s)
+  
+storia <- modello %>% fit(x = train_x,
+            y = train_y,
+            batch_size = nrow(train_x),
+            epochs = 1000,
+            verbose = 1,
+            validation_data = list(val_x,val_y),
+            callbacks = early_stop)
+
+## L1 - c(300,300,300). Più lambda è grande, più aggiorna piano. Meglio così.
+# lambda = 0 --> val.mse = 2960
+# lambda = 0.1 --> val.mse = 2800/3000
+# lambda = 1 --> 2823
+# lambda = 2 --> 2810
+# lambda = 3 --> 2685
+# lambda = 3.5 --> 2667
+# lambda = 4 --> 2680
+# lambda = 4.5 --> 2692
+# lambda = 5 --> 2715
+# lambda = 6 --> 2733
+# lambda = 8 --> 2787
+# lambda = 10 --> 2840
+
+## L2
+lambda <- seq(0.5,20, length.out = 40)
+lambda <- seq(0.02,8, length.out = 40)
+
+stopCluster(cl)
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+set.seed(6574)
+seeds <- runif(length(lambda), min = 1000, max = 9999)
+
+## Questo foreach non funziona.
+system.time(r <- foreach (i = 1:length(lambda), .packages = c("keras","tensorflow")) %dopar%  {
+  
+  early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0.005,
+                                      patience = 15,
+                                      verbose = 0)
+
+  modello <- create_model_l1(layers = layers, size = size, input = length(X), lambda = lambda[i], seed = seeds[i])
+  storia <- modello %>% fit(x = train_x,
+            y = train_y,
+            batch_size = nrow(train_x),
+            epochs = 1000,
+            verbose = 0,
+            validation_data = list(val_x,val_y),
+            callbacks = early_stop)
+  
+  list(seed = seeds[i], storia = storia, val_mse = tail(storia$metrics$val_mean_squared_error,1))
+})
+
+## input 80, layers <- 3, size <- c(300,300,300), length(lambda) == 20.
+#2 core: 95 t
+#3 core: 78 t
+#4 core: 67 t
+#5 core: 60 t
+#6 core: 59 t
+#7 core: 56 t
+#8 core: 56 t
+## 56 t fermo.
+
+mses <- c(NA, length(lambda))
+for (j in 1:length(lambda)) {
+  mses[j] <- r[[j]]$storia$metrics$val_mean_squared_error[which.min(r[[j]]$storia$metrics$val_mean_squared_error)]
+}
+lambda[which.min(mses)]
+
+## L1 performa meglio di L2.
+
+
+
+
+## DROPOUT
+layers <- 3
+size <- c(50,50,50)
+
+s <- floor(runif(1, min = 1000, max = 9999))
+s
+modello <- create_model_dropout(layers = layers, size = size, input = length(X), dropout = 0.8, seed = s)
+  
+storia <- modello %>% fit(x = train_x,
+            y = train_y,
+            batch_size = ceiling(nrow(train_x)/2),
+            epochs = 300,
+            verbose = 1,
+            validation_data = list(val_x,val_y),
+            callbacks = early_stop)
+
+storia <- modello %>% fit(x = train_x,
+            y = train_y,
+            batch_size = nrow(train_x),
+            epochs = 150,
+            verbose = 1,
+            validation_data = list(val_x,val_y))
+
+dim(val_x)
+## seed: 3388
+# Dropout 0.2 --> 2745
+# Dropout 0.3 --> 2804
+# Dropout 0.4 --> 2961
+# Dropout 0.5 --> 2745
+
+## Valutando l'R2.
+fits <- predict(modello, as.matrix(data_x[anno1 |anno2,X]), verbose=0, batch_size = 32)
+SSE <- sum((fits - data_x[anno1 |anno2,"output"])^2)
+DEV <- sum((mean(data_x[anno1 |anno2,"output"]) - data_x[anno1 |anno2,"output"])^2)
+R2 <- 1 - SSE/DEV
+R2
+
+## Devo cambiare metodo per stimare il modello con dropout.
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0.01,
+                                      patience = 4,
+                                      verbose = 0)
+
+
+## early_stop 15 funziona bene per il metodo del dropout, per gli altri va bene 2,4.
+
+
+## Regolazione.
+drops <- seq(0.05,0.95, by = 0.05)
+set.seed(6574)
+seeds <- runif(length(drops), min = 1000, max = 9999)
+
+stopCluster(cl)
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+## Questo foreach non funziona.
+system.time(r <- foreach (i = 1:length(drops), .packages = c("keras","tensorflow")) %dopar%  {
+  
+  early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0.005,
+                                      patience = 15,
+                                      verbose = 0)
+
+  modello <- create_model_dropout(layers = layers, size = size, input = length(X), dropout = drops[i], seed = seeds[i])
+  storia <- modello %>% fit(x = train_x,
+            y = train_y,
+            batch_size = nrow(train_x),
+            epochs = 1000,
+            verbose = 0,
+            validation_data = list(val_x,val_y),
+            callbacks = early_stop)
+  
+  list(seed = seeds[i], storia = storia, val_mse = tail(storia$metrics$val_mean_squared_error,1))
+})
+
+r[[1]]$storia$metrics$val_mean_squared_error[which.min(r[[1]]$storia$metrics$val_mean_squared_error)]
+res <-rep(NA,length(drops))
+for(j in 1:length(drops)) {
+  res[j] <- r[[j]]$storia$metrics$val_mean_squared_error[which.min(r[[j]]$storia$metrics$val_mean_squared_error)]
+}
+
+drops[which.min(res)]  ## 0.6
+
+## Il dropout fa meglio degli altri, ed è più veloce.
+
+
+
+
+```
+
+```{r Prove NN 1 layer - Effetti Lineari}
+
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Abbiamo i dati, splittiamoli.
+
+layers = 1
+size <- c(160)
+
+## Creiamo i modelli che servono.
+modello <- create_model_l2(layers, size, input = length(X), lambda = 0, seed = floor(runif(1,10,9999)))
+
+modello <- keras_model_sequential()
+
+modello %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+                      input_shape = length(X),
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+modello %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+
+##
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 1,
+                                      verbose = 0)
+
+##Stimiamo il modello.
+storia <- modello %>% fit(
+  as.matrix(data[,X]),
+  as.matrix(data[,"output"]),
+  validation_split = 0.2,
+  verbose = 1,
+  epochs = 120,
+  callbacks = early_stop
+)
+
+## Performance?
+fits <- predict(modello, as.matrix(data[,X]))
+fits[1:10]
+data[,"output"][1:10]
+
+## Non è male.
+SSE <- sum((fits - data[,"output"])^2)
+DEV <- sum((data[,"output"] - mean(data[,"output"]))^2)
+1 - SSE/DEV
+## 0.83 di R2. Ottimo.
+
+## Adesso vediamo con uno split manuale di data, per vedere se il problema è quello.
+train <- sample(1:nrow(data),floor(0.8*nrow(data)))
+training_x <- as.matrix(data[train,X])
+training_y <- data[train,"output"]
+validation_x <- as.matrix(data[-train,X])
+validation_y <- data[-train,"output"]
+
+##Stesso modello di partenza.
+
+storia <- modello %>% fit(
+  training_x,
+  training_y,
+  validation_data= list(validation_x,validation_y),
+  verbose = 1,
+  epochs = 120,
+  callbacks = early_stop
+)
+
+## Sembra sostanzialmente identico.
+## SUL TRAINING SET R2
+fits <- predict(modello, training_x)
+
+## Non è male.
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+1 - SSE/DEV  ## 0.83 sul training set
+
+## SUL VALIDATION SET R2
+fits <- predict(modello, validation_x)
+
+## Non è male.
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+1 - SSE/DEV  ## 0.82 sul validation set. Mi va bene 
+
+
+## EFFETTI LINEARI
+# layers = 1, size = 10 --> Input correlati, Incorrelati, R2 elevato in training e validation.
+# layers = 1, size = 20 --> Input incorrelata, il divario inizia ad aumentare, anche se di poco.(0.9,0.87).
+# layers = 1, size = 40 --> Input incorrelati, (0.93,0.89).
+# layers = 1, size = 80 --> Input incorrelati, (0.97,0.92).
+# layers = 1, size = 160 --> Input incorrelati, (0.91, 0.87). Differenza di 0.5 sempre. Va bene.
+
+## Con gli input correlati, in realtà, è un po' più stabile sembra.
+
+```
+
+```{r Prove NN 2-3 layer - Effetti Lineari}
+
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Abbiamo i dati, splittiamoli.
+
+layers = 3
+size <- c(100,100,100)
+
+modello <- keras_model_sequential()
+
+modello %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+                      input_shape = length(X),
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Hidden2",
+                      units = size[2],
+                      activation = "relu",
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Hidden3",
+                      units = size[3],
+                      activation = "relu",
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+
+modello %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 2,
+                                      verbose = 0)
+
+
+## Adesso vediamo con uno split manuale di data, per vedere se il problema è quello.
+train <- sample(1:nrow(data),floor(0.8*nrow(data)))
+training_x <- as.matrix(data[train,X])
+training_y <- data[train,"output"]
+validation_x <- as.matrix(data[-train,X])
+validation_y <- data[-train,"output"]
+
+##Stesso modello di partenza.
+
+storia <- modello %>% fit(
+  training_x,
+  training_y,
+  validation_data= list(validation_x,validation_y),
+  verbose = 1,
+  epochs = 120,
+  callbacks = early_stop
+)
+
+## Sembra sostanzialmente identico.
+## SUL TRAINING SET R2
+fits <- predict(modello, training_x)
+
+## Non è male.
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+1 - SSE/DEV  ## 0.83 sul training set
+
+## SUL VALIDATION SET R2
+fits <- predict(modello, validation_x)
+
+## Non è male.
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+1 - SSE/DEV 
+
+
+## Qualsiasi cosa faccia, il modello funziona bene.
+```
+
+```{r Prove NN 1 layer - Effetti Quadratici}
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Abbiamo i dati, splittiamoli.
+
+layers = 1
+size <- c(40)
+
+## Creiamo i modelli che servono.
+modello <- keras_model_sequential()
+
+modello %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+                      input_shape = length(X),
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+modello %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 1,
+                                      verbose = 0)
+
+## DATI
+train <- sample(1:nrow(data),floor(0.8*nrow(data)))
+training_x <- as.matrix(data[train,X])
+training_y <- data[train,"output"]
+validation_x <- as.matrix(data[-train,X])
+validation_y <- data[-train,"output"]
+
+##Stesso modello di partenza.
+
+storia <- modello %>% fit(
+  training_x,
+  training_y,
+  validation_data= list(validation_x,validation_y),
+  verbose = 1,
+  epochs = 120,
+  callbacks = early_stop
+)
+
+## SUL TRAINING SET R2
+fits <- predict(modello, training_x)
+
+## Non è male.
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+1 - SSE/DEV  ## 0.60 sul training set
+
+## SUL VALIDATION SET R2
+fits <- predict(modello, validation_x)
+
+## Non è male.
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+1 - SSE/DEV  ## 0.54 sul validation set. Mi va bene.
+
+
+## EFFETTI QUADRATICI
+# layers = 1, size = 10 --> Input correlati, R2 (0.6-0.54).
+# layers = 1, size = 20 --> Input correlati, R2 (0.8-0.77).
+# layers = 1, size = 40 --> Input correlati, R2 (0.86-0.83).
+# layers = 1, size = 60 --> Input correlati, R2 (0.87-0.83).
+# layers = 1, size = 150 --> Input correlati, R2 (0.88-0.83).
+
+## Input incorrelati fa un po' più fatica.
+# layers = 1, size = 20 --> Input incorrelati, R2 (0.76-0.61).
+# layers = 1, size = 60 --> Input incorrelati, R2 (0.94-0.79).
+# layers = 1, size = 150 --> Input incorrelati, R2 (0.98-0.88).
+
+
+```
+
+```{r Prove NN 2-3 layer - Effetti Quadratici}
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Abbiamo i dati, splittiamoli.
+
+layers = 3
+size <- c(60,60,60)
+
+modello <- keras_model_sequential()
+
+modello %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+                      input_shape = length(X),
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Hidden2",
+                      units = size[2],
+                      activation = "relu",
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Hidden3",
+                      units = size[3],
+                      activation = "relu",
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))),
+              kernel_regularizer = regularizer_l2(l = 0))
+
+modello %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+
+modello %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 2,
+                                      verbose = 0)
+
+
+## Adesso vediamo con uno split manuale di data, per vedere se il problema è quello.
+train <- sample(1:nrow(data),floor(0.8*nrow(data)))
+training_x <- as.matrix(data[train,X])
+training_y <- data[train,"output"]
+validation_x <- as.matrix(data[-train,X])
+validation_y <- data[-train,"output"]
+
+##Stesso modello di partenza.
+
+storia <- modello %>% fit(
+  training_x,
+  training_y,
+  validation_data= list(validation_x,validation_y),
+  verbose = 1,
+  epochs = 120,
+  callbacks = early_stop
+)
+
+## Sembra sostanzialmente identico.
+## SUL TRAINING SET R2
+fits <- predict(modello, training_x)
+
+## Non è male.
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+1 - SSE/DEV  ## 0.83 sul training set
+
+## SUL VALIDATION SET R2
+fits <- predict(modello, validation_x)
+
+## Non è male.
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+1 - SSE/DEV 
+
+## INPUT INCORRELATI
+# Layer = 2, size =c(10,10) --> (0.59-0.47)
+# Layer = 2, size =c(20,20) --> (0.79-0.57)
+# Layer = 2, size =c(40,40) --> (0.88-0.70)
+# Layer = 2, size =c(60,60) --> (0.91-0.75)
+# Layer = 2, size =c(100,100) --> (0.98-0.89)
+
+# Layer = 3, size =c(10,10,10) --> (0.62-0.45)
+# Layer = 3, size =c(20,20,20) --> (0.76-0.57)
+# Layer = 3, size =c(40,40,40) --> (0.89-0.67)
+# Layer = 3, size =c(60,60,60) --> (0.89-0.85)
+# Layer = 3, size =c(100,100,100) --> (0.97-0.84)
+
+## INPUT CORRELATI
+# Layer = 2, size =c(10,10) --> (0.72-0.65)
+# Layer = 2, size =c(20,20) --> (0.76-0.73)
+# Layer = 2, size =c(40,40) --> (0.88-0.82)
+# Layer = 2, size =c(60,60) --> (0.91-0.86)
+# Layer = 2, size =c(100,100) --> (0.91-0.84)
+
+# Layer = 3, size =c(10,10,10) --> (0.66-0.57)
+# Layer = 3, size =c(20,20,20) --> (0.77-0.72)
+# Layer = 3, size =c(40,40,40) --> (0.87-0.82)
+# Layer = 3, size =c(60,60,60) --> (0.95-0.82)
+# Layer = 3, size =c(100,100,100) --> (0.92-0.86)
+
+```
+
+```{r Regolazione del modello - Dropout}
+
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Abbiamo i dati, splittiamoli.
+
+layers = 3
+size <- c(400,400,400)
+
+dropout = 0
+
+modello <- create_model_dropout(layers = layers, size = size, length(X), dropout, seed=runif(1,10,9999))
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 2,
+                                      verbose = 0)
+
+
+## Adesso vediamo con uno split manuale di data, per vedere se il problema è quello.
+train <- sample(1:nrow(data),floor(0.8*nrow(data)))
+training_x <- as.matrix(data[train,X])
+training_y <- data[train,"output"]
+validation_x <- as.matrix(data[-train,X])
+validation_y <- data[-train,"output"]
+
+##Stesso modello di partenza.
+
+storia <- modello %>% fit(
+  training_x,
+  training_y,
+  validation_data= list(validation_x,validation_y),
+  verbose = 1,
+  epochs = 150,
+  callbacks = early_stop
+)
+
+## SUL TRAINING SET R2
+fits <- predict(modello, training_x)
+
+## Non è male.
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+1 - SSE/DEV 
+
+## SUL VALIDATION SET R2
+fits <- predict(modello, validation_x)
+
+## Non è male.
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+1 - SSE/DEV 
+
+## size = c(20) --> dropout=0.2 (0.71,0.68) ... 0.6 (0.44,0.41)
+## size = c(40,40,40) --> dropout=0.6 (0.42,0.41) ... 0.2 (0.66,0.60) ... 0.1 (0.74,0.69) 0.05 (0.77,0.72)
+
+## size = c(80*3) ---> dropout 0:(0.88,0.81), 0.05:(0.86,0.78), 0.1:(0.84,0.79), 0.3:(0.77,0.71)
+
+## size = c(140*3) --> 0:(0.91,0.85) 0.05:(0.9,0.83) 0.1(0.89,0.82) 0.2(0.85,0.8)
+## size = c(200*3) --> 0:(0.98,0.93) 0.05:(0.91,0.86) 0.1(0.92,0.84) 0.2(0.85,0.8)
+
+## size = c(400*3) --> 0:(0.94,0.88) 0.05:(0.97,0.90) 0.1(0.96,0.89) 0.2(0.92,0.85) 0.6(0.75,0.69)
+
+## size = c(800*3) --> 0:(0.98,0.93) 0.05:(0.97,0.92) 0.1(0.96,0.89) 0.2(0.92,0.85) 0.6(0.75,0.69)
+
+
+```
+
+```{r Riducendo i dati?}
+## Con tutti i dati il modello è molto stabile.
+anno1 <- data$Days <= 365
+data <- data[anno1,]
+
+## Vediamo la selezione nel primo anno.
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+## Abbiamo i dati, splittiamoli.
+
+layers = 3
+size <- c(350,350,350)
+
+## Creiamo i modelli che servono.
+modello <- keras_model_sequential()
+
+modello %>% layer_dense(name = "Hidden1",
+                      units = size[1],
+                      activation = "relu",
+                      input_shape = length(X),
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+modello %>% layer_dense(name = "Hidden2",
+                      units = size[2],
+                      activation = "relu",
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+modello %>% layer_dense(name = "Hidden3",
+                      units = size[3],
+                      activation = "relu",
+              kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+modello %>% layer_dense(name = "Output",
+                        units = 1,
+                        activation = "linear",
+                        kernel_initializer = initializer_random_normal(seed = floor(runif(1,10,9999))))
+
+modello %>% compile(loss = "mean_squared_error",
+                  optimizer ="Adam",
+                  metrics = "mean_squared_error")
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 2,
+                                      verbose = 0)
+
+## DATI
+train <- sample(1:nrow(data),floor(0.8*nrow(data)))
+training_x <- as.matrix(data[train,X])
+training_y <- data[train,"output"]
+validation_x <- as.matrix(data[-train,X])
+validation_y <- data[-train,"output"]
+
+##Stesso modello di partenza.
+
+storia <- modello %>% fit(
+  training_x,
+  training_y,
+  validation_data= list(validation_x,validation_y),
+  verbose = 1,
+  epochs = 120,
+  callbacks = early_stop
+)
+
+## SUL TRAINING SET R2
+fits <- predict(modello, training_x)
+
+## Non è male.
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+1 - SSE/DEV  ## 0.60 sul training set
+
+## SUL VALIDATION SET R2
+fits <- predict(modello, validation_x)
+
+## Non è male.
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+1 - SSE/DEV
+
+## CORRELAZIONE
+## c(5) --> (0.38,0.21) drop 0.05: (0.41,0.38) drop 0.1: (0.42,0.31) drop =.15 (0.43) drop 0.2(0.39,0.26)
+## c(10) --> (0.47,0.34)
+## c(20) --> (0.43,0.26)
+## c(40) --> (0.58,0.39)
+## c(60) --> (0.70,0.38)
+## c(80) --> (0.64, 0.43)
+## c(120) --> (0.73, 0.43)
+
+## c(10,10) --> (0.52,0.23)
+## c(20,20) --> (0.69, 0.47)
+## c(40,40) --> (0.78,0.39)
+## c(60,60) --> (0.78,0.48)
+## c(90,90) --> (0.89,0.56)
+## c(120,120) --> (0.89,0.47)
+
+## c(10,10,10) --> (0.44,0.22) drop 0.05: (0.51,0.37) drop 0.1: (0.53,0.39) drop:0.15: (0.34,0.21) drop0.2: (0.37,0.3) drop (0.42,0.36) più alto non risolve.
+## c(20,20,20) --> (0.57, 0.42)
+## c(40,40,40) --> (0.66,0.39)
+## c(60,60,60) --> (0.78,0.36)
+## c(90,90,90) --> (0.89,0.46)
+## c(120,120,120) --> (0.94,0.5)
+
+## con DROPOUT
+layers = 1
+size <- c(10)
+
+dropout = 0.6
+
+modello <- create_model_dropout(layers = layers, size = size, input = length(X), dropout, seed=runif(1,10,9999))
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 2,
+                                      verbose = 0)
+
+
+## Adesso vediamo con uno split manuale di data, per vedere se il problema è quello.
+train <- sample(1:nrow(data),floor(0.8*nrow(data)))
+training_x <- as.matrix(data[train,X])
+training_y <- data[train,"output"]
+validation_x <- as.matrix(data[-train,X])
+validation_y <- data[-train,"output"]
+
+##Stesso modello di partenza.
+
+storia <- modello %>% fit(
+  training_x,
+  training_y,
+  validation_data= list(validation_x,validation_y),
+  verbose = 1,
+  epochs = 150,
+  callbacks = early_stop
+)
+
+## SUL TRAINING SET R2
+fits <- predict(modello, training_x)
+
+## Non è male.
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+1 - SSE/DEV 
+
+## SUL VALIDATION SET R2
+fits <- predict(modello, validation_x)
+
+## Non è male.
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+1 - SSE/DEV 
+
+## I modelli, su pochi dati, fanno decidsamente schifo.
+```
+
+```{r Conclusioni}
+
+## Dati to Input è la relazione importante. Usando 5 anni, 2 osservazioni per giorno sono necessarie per ottenere buoni risultati
+
+## Se troppo pochi dati, il modello non riesce a generalizzare (grosse differenze tra R2 di training e di testing).
+
+## Soluzione: ridurre gli input o aumentare i dati a disposizione. Aumentare i dati sembra la via da seguire, visto che 24 osservazioni giornaliere sono la norma con i dati disponibili.
+```
+
+```{r Regolazione Reti Neurali}
+
+tensorflow::set_random_seed(8119)
+regulated <- c()
+reps <- 3
+
+layers <- 3
+size <- c(200,200,200)
+
+#max_t0 <- 45
+
+drops <- seq(0,0.15, length.out = 5)
+grid <- data.frame(dropout = drops)
+# cl <- makeCluster(5, outfile ="")
+# clusterExport(cl, c("create_model_dropout","early_stop","layers","size","X"))
+# registerDoParallel(cl)
+
+k = 0
+
+CVs <- list(X = X)
+
+system.time(
+for (i in 365:(365+max_t0)) {
+  
+  if((i - 365) %% retrain == 0) {
+    
+    k = k + 1
+    cat("\nRegolazione numero:",k)
+    
+    data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+    
+    output <- cv_nn(data_x[data_to_use,-days.pos], nsets, grid, time_wise = TRUE, reps)
+    CVs[[k]] <- output
+    
+    mse_medi <- apply(output$results,2,mean)
+    
+    ##Elemento ottimale della griglia.
+    opt <- which.min(mse_medi)
+    regulated <- rbind(regulated, c(i,opt, as.numeric(grid[opt,])))
+    
+    ## Salviamo i parametri del modello.
+    
+  }
+}
+)
+
+
+CVs[[1]]
+## 1149 t. 20 minuti.
+## 1183 t.
+
+colnames(regulated) <- c("Giorno","Optimal","Dropout")
+regulated.nn <- regulated
+
+
+## Proviamo a ristimare uno di quei modelli
+i=365
+data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+
+## Creiamo i set di training e di test.
+data_use <- data_x[data_to_use,]
+train <- sample(1:nrow(data_use), floor(nrow(data_use)*0.80))
+training_x <- as.matrix(data_use[train,X])
+training_y <- data_use[train,"output"]
+validation_x <- as.matrix(data_use[-train,X])
+validation_y <- data_use[-train,"output"]
+
+seeds <- floor(runif(3,min=1000, max=9999))
+model.nn <- create_model_dropout(layers, size, length(X), dropout = 0, seed =seeds[1])
+
+storia <- model.nn %>% fit(x = training_x,
+            y = training_y,
+            batch_size = ceiling(length(train)/2),
+            epochs = 500,
+            verbose = 1,
+            validation_data = list(validation_x,validation_y),
+            callbacks = early_stop)
+
+## Abbiamo il modello, ristimiamolo con il corretto numero di epoche.
+epoc <- which.min(storia$metrics$val_mean_squared_error)
+
+model.nn <- create_model_dropout(layers, size, length(X), dropout = 0, seed =seeds[1])
+
+storia <- model.nn %>% fit(x = training_x,
+            y = training_y,
+            batch_size = ceiling(length(train)/2),
+            epochs = epoc,
+            verbose = 1,
+            validation_data = list(validation_x,validation_y))
+
+## Prevediamo da questo modello.
+fits <- predict(model.nn, as.matrix(data_use[,X]), batch_size =32)
+
+dim(as.matrix(data_use[,X]))
+
+SSE <- sum((fits - data_use$output)^2)
+SSE
+DEV <- sum((data_use$output - mean(data_use$output))^2)
+R2 <- 1 - SSE/DEV
+R2
+
+## Verifico l'R2 sul training e sul validation set?
+fits <- predict(model.nn, validation_x, batch_size =32)
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+R2 <- 1 - SSE/DEV
+R2
+
+## Vediamo il mean_squared_error
+mse_val <- mean((fits - validation_y)^2)
+mse_val
+
+##
+fits <- predict(model.nn, training_x, batch_size =32)
+SSE <- sum((fits - training_y)^2)
+DEV <- sum((training_y - mean(training_y))^2)
+R2 <- 1 - SSE/DEV
+R2
+
+## Verifico l'R2 sul training e sul validation set?
+fits <- predict(model.nn, validation_x, batch_size =32)
+SSE <- sum((fits - validation_y)^2)
+DEV <- sum((validation_y - mean(validation_y))^2)
+R2 <- 1 - SSE/DEV
+R2
+
+```
+
+```{r Degenerazione Rete Neurale - Ciclo}
+tensorflow::set_random_seed(22167)
+
+#load("C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/INTERAZIONE_con_ERRORE/regulated.nn")
+regulated <- regulated.nn
+days_selected <- seq(365,365+max_t0, by = 3)
+
+regulated  ## Ottenuto da "Regolazione Reti Neurali"
+reps <- 3
+
+layers <- 3
+size <- c(200,200,200)
+
+#stopCluster(cl)
+numCores <- detectCores()
+cl <- makeCluster(numCores - 1)
+clusterExport(cl, c("layers","size","X"))
+registerDoParallel(cl)
+
+set.seed(992)
+
+system.time(
+r <- foreach (i = days_selected, .packages = c("keras","tensorflow"), .export= c("create_model_dropout")) %dopar% {
+  #i = 365
+  
+  early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                min_delta = 0,
+                                patience = 3,
+                                verbose = 0)
+  
+  ## Dati da usare
+  data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
+  
+  ## Aggiorniamo la struttura.
+  reg_to_use <- sum(i >= regulated[,1])
+  
+  ## Creo i training e i test set.
+  data_use <- data_x[data_to_use,]
+  train <- sample(1:nrow(data_use), floor(nrow(data_use)*0.8))
+  training_x <- as.matrix(data_use[train,X])
+  validation_x <- as.matrix(data_use[-train,X])
+  training_y <- data_use[train,"output"]
+  validation_y <- data_use[-train,"output"]
+  
+ 
+  opt <- regulated[reg_to_use,2]
+  
+  ## Genero i seed
+  seeds <- floor(runif(reps,min=1000, max=9999))
+  models_reps <- rep(NA,reps)
+  epochs_reps <- rep(NA,reps)
+  
+  for (j in 1:reps) {
+    m.nn <- create_model_dropout(layers, size, length(X), grid[opt,1], seeds[j])
+    
+    storia <- m.nn %>% fit(x = training_x,
+          y = training_y,
+          batch_size = ceiling(nrow(training_x)/2),
+          epochs = 1000,
+          verbose = 1,
+          validation_data = list(validation_x,validation_y),
+          callbacks = early_stop)
+    
+    models_reps[j] <- storia$metrics$val_mean_squared_error[which.min(storia$metrics$val_mean_squared_error)]
+    epochs_reps[j] <- which.min(storia$metrics$val_mean_squared_error)
+  }
+  
+  ## Ristimo il modello migliore, usando il numero di epoche ottimali.
+  seed <- seeds[which.min(models_reps)]
+  epoche <- epochs_reps[which.min(models_reps)]
+  
+  m.nn <- create_model_dropout(layers, size, length(X), grid[opt,1], seed)
+    
+  storia <- m.nn %>% fit(x = training_x,
+        y = training_y,
+        batch_size = ceiling(nrow(training_x)/2),
+        epochs = epoche,
+        verbose = 1,
+        validation_data = list(validation_x,validation_y),
+        callbacks = early_stop)
+
+  ## R2.
+  fits.nn <- predict(m.nn, as.matrix(data_use[,X]), batch_size = 32, verbose = 0)
+  SSE <- sum((data_use[,"output"] - fits.nn)^2)
+  DEV <- sum((data_use[,"output"] - mean(data_use[,"output"]))^2)
+
+  R2 <- 1 - SSE/DEV
+  
+  ##Elemento utilizzato.
+  optimal_used <- regulated[reg_to_use,2]
+  
+  ## MSE a t0 mse_window.
+  t0_train <- (data_x[,days.pos] > i & data_x[,days.pos] <= (i + mse_window))
+  fits.t0 <- predict(m.nn, as.matrix(data_x[t0_train,X]), batch_size = 32, verbose = 0)
+  mse.t0 <- mean((fits.t0 - data_x[t0_train,out.pos])^2)
+  
+  ## SALVO l'MSE a t0.
+  
+  for_fits <- data_x[,days.pos] >= (i + mse_window + 1) & data_x[,days.pos] < (i + mse_window + max_dt + finestra)
+  to_predict <- data_x[for_fits,out.pos]
+  to_predict_X <- as.matrix(data_x[for_fits,X])
+  
+  ## Mi salvo anche i giorni.
+  days_to_use <- data_x[for_fits,days.pos]
+  
+  ##Tutte le previsioni da i + 1 fino a i + max_dt, finestra poi di finestra
+  fits <- predict(m.nn, to_predict_X, batch_size = 32, verbose = 0)
+  
+  ## Finestre mobili
+  
+  prestazioni <- rep(NA,max_dt)
+  for (j in 1:max_dt) {
+
+    test <- (days_to_use >= (i + j + mse_window) & days_to_use < (i + j + mse_window + finestra))
+    mse <- mean((to_predict[test] - fits[test])^2)
+    
+    prestazioni[j] <- mse
+  }
+  
+  list(R2 = R2,epoche = epoche,optimal = optimal_used, mse_t0 = mse.t0, prestazioni = prestazioni)
+  
+}
+)
+
+stopCluster(cl)
+
+for (j in 1:length(days_selected)) {
+  models.attr[days_selected[j] - 364,"R2"] <- r[[j]]$R2
+  models.attr[days_selected[j] - 364,"Grid_opt"] <- r[[j]]$optimal
+  models.attr[days_selected[j] - 364,"MSE a t0"] <- r[[j]]$mse_t0
+  models.attr[days_selected[j] - 364,"Epoche"] <- r[[j]]$epoche
+  results[days_selected[j] - 364,] <- r[[j]]$prestazioni
+}
+
+models.attr.nn <- models.attr
+results.nn <- results
+plot(results.nn[364,])
+
+```
+
+```{r Plot Rete Neurale}
+
+nn_plot <- function(models.attr, results, title) {
+  
+  ## Dataframed
+  res.for.plot <- as.data.frame(t(results))
+  res.for.plot$dt <- as.numeric(gsub("dt: ","",rownames(res.for.plot)))
+  rownames(res.for.plot) <- NULL
+  
+  ## Togliamo 
+  res.scale.for.plot <- res.for.plot
+
+  ## Dividiamo gli MSE assoluti per renderli relativi.
+  for (i in 1:nrow(models.attr)) {
+    res.scale.for.plot[,i] <- res.scale.for.plot[,i]/models.attr[i,3]   ## Dividiamo per MSE a t0
+  }
+
+  ## Calcoliamo i quantili
+  qt <- matrix(NA, nrow = max_dt, ncol = 4)
+  colnames(qt) <- c("q25","q50","q75","dt")
+  rownames(qt) <- 1:max_dt
+
+  ## Popoliamo la matrice con i quantili
+  for (i in 1:max_dt) {
+    qt[i,] <- c(quantile(as.numeric(res.scale.for.plot[i,-ncol(res.scale.for.plot)]), probs = c(0.25,0.5,0.75)),i)
+  }
+  qt.for.plot <- as.data.frame(qt)
+
+  ## Proviamo a plottare.
+
+  ## Abbiamo bisogno dei singoli punti.
+  res.scale.for.plot1 <- res.scale.for.plot[,c(1,ncol(res.scale.for.plot))]
+  colnames(res.scale.for.plot1) <- c("values","dt")
+
+
+  for (i in 2:(ncol(res.scale.for.plot)-1)) {
+    tmp.df <- as.matrix(res.scale.for.plot[,c(i,ncol(res.scale.for.plot))])
+    colnames(tmp.df) <- c("values","dt")
+    res.scale.for.plot1 <- rbind(res.scale.for.plot1,tmp.df)
+  }
+  
+  plot <- ggplot(data = res.scale.for.plot1, aes(x = dt, y = values)) + geom_point(stat="identity", col = blu_points, size = 0.8) +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q25), color = "yellow") +
+  geom_line(data=qt.for.plot, mapping = aes(x = dt, y = q50), color = "black") +
+  geom_line( data=qt.for.plot, mapping = aes(x = dt, y = q75), color = "red") +
+  ylab("MSE Relativo") + xlab("dT, days after trained") + ggtitle(title)
+  
+  return(plot)
+
+}
+
+```
+
+
+
+## SALVATAGGIO RISULTATI
+```{r}
+
+## Ridge
+save(models.attr.ridge, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.ridge")
+save(results.ridge, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.ridge")
+
+## Random Forest
+save(regulated.rf, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/regulated.rf")
+save(models.attr.rf, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.rf")
+save(results.rf, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.rf")
+
+## Gradient Boosting
+save(regulated.gb, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/regulated.gb")
+save(models.attr.gb, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.gb")
+save(results.gb, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.gb")
+
+## Neural Network
+save(regulated.nn, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/regulated.nn")
+save(models.attr.nn, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.nn")
+save(results.nn, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.nn")
+```
+
+```{r Grafici finali}
+
+blu_points <- rgb(198,219,239, max = 255, alpha=60)
+
+## RIDGE
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.ridge")
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.ridge")
+
+## Non ci sono dati mancanti sulla fine.
+models.attr.ridge <- as.data.frame(na.omit(models.attr.ridge))
+results.ridge <- as.data.frame(na.omit(results.ridge))
+  
+ridge.p <- ridge_plot(models.attr.ridge, results.ridge, "Modello Ridge")
+
+
+## RANDOM FOREST
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.rf")
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.rf")
+models.attr.rf <- as.data.frame(na.omit(models.attr.rf))
+results.rf <- as.data.frame(na.omit(results.rf))
+
+rf.p <- rf_plot(models.attr.rf, results.rf, "Modello RF")
+
+## GRADIENT BOOSTING
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.gb")
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.gb")
+models.attr.gb <- as.data.frame(na.omit(models.attr.gb))
+results.gb <- as.data.frame(na.omit(results.gb))
+
+gb.p <- gb_plot(models.attr.gb, results.gb, title = "Modello GB")
+gb.p
+
+## RETE NEURALE
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.nn")
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.nn")
+models.attr.nn <- as.data.frame(na.omit(models.attr.nn))
+results.nn <- as.data.frame(na.omit(results.nn))
+
+nn.p <- nn_plot(models.attr.nn, results.nn, title = "Modello NN")
+nn.p
+
+
+
+ridge.p
+rf.p
+gb.p
+nn.p
+```
+
+```{r Ottenimento dei SSE}
+
+MSSE_t0 <- function(data_x, days_selected, output_pos, days_pos)  {
+  
+  MSSE_df <- data.frame(MSSE_t0 = NA)
+  
+  for (i in days_selected) {
+
+    t0_train <- (data_x[,days_pos] > i & data_x[,days_pos] <= (i + mse_window))
+    MSSE_df[i - 364,] <- mean((data_x[t0_train,output_pos] - mean(data_x[t0_train,output_pos]))^2)
+
+  }
+  
+  return(MSSE_df)
+}
+
+
+```
+
+```{r R2 predittivi}
+
+## Per il ridge
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.ridge")
+data_x <- as.matrix(data[,c(X,"Days","output")])
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+models.attr.ridge <- as.data.frame(models.attr.ridge)
+
+days_selected <- seq(365,365+max_t0, by = 3)
+
+MSSE_days_sel <- MSSE_t0(data_x, days_selected, out.pos, days.pos)
+models.attr.ridge$R2_pred <- ifelse(!is.na(models.attr.ridge$`MSE a t0`),1 - models.attr.ridge$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
+
+
+## Per la Random Forest
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.rf")
+data_x <- data[,c(X,"Days","output")]
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+models.attr.rf <- as.data.frame(models.attr.rf)
+
+models.attr.rf$R2_pred <- ifelse(!is.na(models.attr.rf$`MSE a t0`),1 - models.attr.rf$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
+
+
+
+## Gradient Boosting
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.gb")
+data_x <- data[,c(X,"Days","output")]
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+models.attr.gb <- as.data.frame(models.attr.gb)
+models.attr.gb$R2_pred <- ifelse(!is.na(models.attr.gb$`MSE a t0`),1 - models.attr.gb$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
+
+
+
+## Neural Network
+load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.nn")
+models.attr.nn <- models.attr.nn[-c(nrow(models.attr.nn),nrow(models.attr.nn)-1),]
+data_x <- data[,c(X,"Days","output")]
+days.pos <- ncol(data_x) - 1
+out.pos <- ncol(data_x)
+models.attr.nn <- as.data.frame(models.attr.nn)
+models.attr.nn$R2_pred <- ifelse(!is.na(models.attr.nn$`MSE a t0`),1 - models.attr.nn$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
+
+```
+
