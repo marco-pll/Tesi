@@ -4,6 +4,42 @@ author: "Marco"
 date: "2023-10-03"
 output: html_document
 ---
+```{r Fatte e da fare}
+#7/11/2023
+# ARMA nella media. R2 predittivi molto bassi. Non sono state incluse le variabili per catturare gli effetti.
+
+# Da fare: includere le variabili. FATTO
+# Provare con la stagionalita. 
+# Confrontare i risultati senza e con le variabili. FATTO
+
+
+#8/11/2023
+# Mandato l'effeto stagionale nelle medie, senza variabili del tempo.
+# Mandare con l'effetto delle variabili nel tempo. Già non c'era niente, non c'è nulla da risolvere.
+# Forse dovrei provare ad includere i ritardi stagionali?. Fatto
+# Ricontrollare velocemente gli R2 predittivi dell'ARMA.
+
+# Mettere delle relazioni più complicate, tipo i quadrati.
+
+#11/11/2023
+# La componente stagionale nelle medie rompe molto i coglioni.
+# Dovremmo mettere i ritardi anche nella componente stagionale nell'errore. Fatto
+# Bisogna rilanciare tutte le cose con la stagionalita, perchè il giorno dell'anno era sbagliato.
+# La rete neurale è stata sistemata.
+
+# Ricontrollare la performance dell'ARMA. Fatto
+
+## 13/11/2023
+# Fatto le prove con l'andamento ARMA negli effetti dei coefficienti. Tutti i coefficienti variano.
+
+## 16/11/2023
+# Andamento stagionale nei coefficienti mandato.
+# Provato a sistemare la random forest: aumentare le osservazioni aumenta leggermente la performance. 
+# effetti tra -2:2, sd_WN = 20 R2 ridge =0.78, R2 rf = 0.6
+# effetti tra -1.5:1.5, sd_WN = 8 R2 ridge =0.83 R2 rf =0.64
+# il distacco è sempre quello.
+```
+
 ```{r Reset}
 rm(list=ls())
 ```
@@ -14,6 +50,8 @@ library(ggplot2)
 library(glmnet)
 library(ranger)
 library(gbm)
+library(sm)
+library(gridExtra)
 
 ## Per generare le matrici di varianbza e covarianza.
 #library(clusterGeneration)
@@ -29,14 +67,15 @@ library(keras)
 library(tensorflow)
 ```
 
-```{r Simulazioni - Funzioni senza cambiamento nel tempo}
+```{r FUNZIONI senza cambiamento nel tempo}
 
 ## Matrice di varianza e covarianza con correlazione.
-get_Sigma <- function(nvar_input) {
-  Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input, ncol=nvar_input)
+get_Sigma <- function(nvar_input, rho) {
+  Sigma <- matrix(runif(nvar_input*nvar_input,min=-rho,max=rho),nrow=nvar_input, ncol=nvar_input)
   Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
   diag(Sigma) <- rep(1, nvar_input)
-  return(list(mat = nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat, convergence = nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$converged))
+  Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)
+  return(list(mat = Sigma$mat, convergence = Sigma$converged))
 }
 
 ## Aggiunge outliers
@@ -53,7 +92,7 @@ add.outliers <- function(output, freq) {
 
 ## Noise normale
 noise.lin <- function(n) {
-  return(rnorm(n = n,mean = 0, sd = sqrt(noise_Sigma)))
+  return(rnorm(n = n,mean = 0, sd = sqrt(sd_WN)))
 }
 
 ## Output funzione lineare
@@ -176,61 +215,26 @@ int.quad.out <- function(input) {
 create.data <- function(output,input, daily_obs) {
   data <- cbind(input,output,rep(1:n_giorni,each=daily_obs))
   colnames(data)[ncol(data)] <- "Days"
-  return(data)
+  return(as.data.frame(data))
 }
 
 ```
 
-```{r Plot delle relazioni quadratiche}
-## V1 e output
-plot.V1 <- ggplot(data, aes(x = V1, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V1
-
-plot.V2 <- ggplot(data, aes(x = V2, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V2
-
-plot.V3 <- ggplot(data, aes(x = V3, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V3
-
-plot.V4 <- ggplot(data, aes(x = V4, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V4
-
-plot.V5 <- ggplot(data, aes(x = V5, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V5
-
-plot.V6 <- ggplot(data, aes(x = V6, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V6
-
-plot.V7 <- ggplot(data, aes(x = V7, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V7
-
-plot.V8 <- ggplot(data, aes(x = V8, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V8
-
-plot.V9 <- ggplot(data, aes(x = V9, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V9
-
-plot.V10 <- ggplot(data, aes(x = V10, y = output)) + geom_point(stat ="identity") + geom_smooth()
-plot.V10
-
-data.quad
-```
-
-```{r Simulazioni - STAZIONARIETA', nessun cambiamento nel tempo del fenomeno}
+```{r Simulazioni STAZIONARIETA', nessun cambiamento nel tempo del fenomeno}
 
 ## PRIMO DATASET
 ## Input indipendenti
 nvar_input <- 80
 n_giorni <- 1825
 daily_obs <- 10
-noise_Sigma <- 150
+sd_WN <- 150
 mu <- rep(0,nvar_input)
 Sigma <- diag(rep(1,nvar_input))
 
 set.seed(4921)
 input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
 output.lin <- lin.out(input)
-data <- create.data(output.lin,input)
+data <- create.data(output.lin,input, daily_obs)
 fit <- lm(output~., data = data[,-ncol(data)])
 summary(fit)
 ## R2 = 0.81
@@ -249,13 +253,31 @@ Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
 Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
 diag(Sigma) <- rep(1, nvar_input)
 Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
-
 input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
 output.lin <- lin.out(input)
 data <- create.data(output.lin,input)
 fit <- lm(output~., data = data[,-ncol(data)])
 summary(fit)
 ## R2 di 0.80
+
+
+## DATASET DI PROVA RANDOM FOREST - Per fixare le prestazioni della random forest.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- 120
+#sd_WN <- 8 perché gli effetti sono più piccoli
+mu <- rep(0,nvar_input)
+
+set.seed(119)
+Sigma <- matrix(runif(nvar_input*nvar_input,min=-0.7,max=0.7),nrow=nvar_input)
+Sigma[lower.tri(Sigma)] <- t(Sigma)[lower.tri(Sigma)]
+diag(Sigma) <- rep(1, nvar_input)
+Sigma <- nearPD(Sigma, corr =TRUE, base.matrix = TRUE)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input)
+
 
 ## TERZO DATASET - effetti quadratici
 nvar_input <- 80
@@ -687,7 +709,7 @@ summary(fit)  ## Circa 0.78.
 
 ```
 
-```{r Simulazioni - Funzioni per le variazioni stazionarie}
+```{r FUNZIONI per le variazioni stazionarie}
 
 ## 
 noise.ARMA <- function(n, coefAR, coefMA, d, sd) {
@@ -735,11 +757,47 @@ create.data <- function(output, input) {
   return(data)
 }
 
+get_daily_means <- function(data) {
+  data.dm <- data.frame(Days = unique(data$Days))
+  data.dm$output.mean <- apply(as.matrix(data.dm$Days),1,function(x) mean(data$output[data$Days == x])) 
+  data.dm$output.mean.lag1 <-  c(NA,data.dm$output.mean[1:(nrow(data.dm)-1)])
+  data.dm$output.mean.lag2 <-  c(rep(NA,2),data.dm$output.mean[1:(nrow(data.dm)-2)])
+  cor.l1 <- cor(data.dm$output.mean[-1], data.dm$output.mean.lag1[-1])
+  cor.l2 <- cor(data.dm$output.mean[-c(1,2)], data.dm$output.mean.lag2[-c(1,2)])
+  return(list(data =data.dm, cor.l1 = cor.l1,cor.l2 = cor.l2))
+}
+
+  
+output_plot <- function(data) {
+  
+  ## Media mobile
+  mobile_average <- function(order = m, data = df.for.plot){
+    ma <- apply(as.matrix(data$Days),1,function(x) mean(data$output.mean[data$Days >= (x-order) & data$Days <= (x+order)]))
+    ma[c(1:order,(length(ma)-order+1):length(ma))] <- NA
+    return(ma)
+  }
+    
+  m <- 15
+  df.for.plot <- get_daily_means(data)$data[,c("Days","output.mean")]
+  df.for.plot$mobile_av <- mobile_average(m, df.for.plot)
+  
+  plot <- ggplot(data=df.for.plot, aes(x=Days)) + geom_line(aes(y = output.mean, color = "output"), size=1.2) + 
+    geom_line(aes(y = mobile_av, color = "mobile_av")) + 
+    scale_color_manual(
+    values = c("output" = "lightblue", "mobile_av" = "black"),
+    labels = c("Media giornaliera", "Media mobile"),
+    breaks = c("output", "mobile_av")) + 
+      ggtitle("Variabile risposta simulata - Medie giornaliere e media mobile")
+  
+  return(plot)
+}
+
 ```
 
-```{r Simulazioni STAZIONARIETA ma variazioni nel tempo}
+```{r Simulazioni STAZIONARIETA ARMA}
+sample(1000:10000,1)
 
-## Processo ARMA giornaliero nell'errore + errore specifico.
+## Processo ARMA giornaliero AR=0.6, + errore gionaliero.
 nvar_input <- 80
 n_giorni <- 1825
 daily_obs <- 10
@@ -769,36 +827,1358 @@ fit <- lm(output~., data = data[,-ncol(data)])
 summary(fit)   ## 0.8 R2
 
 
+## Processo ARMA giornaliero, AR=0.9, + errore gionaliero.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(50)
+sd_noiseARMA <- sqrt(70)
+mu <- rep(0,nvar_input)
+Sigma <- diag(rep(1,nvar_input))
+
+set.seed(1110)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output <- lin.out(input)
+
+## Per sporcare l'output, processo stazionario giornaliero.
+noiseARMA <- noise.ARMA(n = n_giorni, coefAR = c(0.9), coefMA = c(0), d=0, sd=sd_noiseARMA)
+noiseARMA.plot(noiseARMA, p = 1, q = 0)
+
+## Per aggiungere degli errori all'interno della giornata.
+noiseWN <- noise.WN(n_giorni*daily_obs) 
+noiseTOT <- rep(noiseARMA,each=daily_obs) + noiseWN
+
+allNoise.plot(noiseARMA, noiseWN, output)
+
+output.final <- output + noiseTOT
+
+data <- create.data(output.final,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)   ## 0.63 di R2, con le stesse specifiche. 0.66 riducendo la variabilità.
 
 
+
+
+
+## DATASET 3 - Includiamo i primi ritardi della risposta.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(50)
+sd_noiseARMA <- sqrt(85)
+mu <- rep(0,nvar_input)
+Sigma <- diag(rep(1,nvar_input))
+
+set.seed(5160)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output <- lin.out(input)
+
+## Per sporcare l'output, processo stazionario giornaliero.
+noiseARMA <- noise.ARMA(n = n_giorni, coefAR = c(0.6), coefMA = c(0), d=0, sd=sd_noiseARMA)
+noiseARMA.plot(noiseARMA, p = 1, q = 0)
+
+## Per aggiungere degli errori all'interno della giornata.
+noiseWN <- noise.WN(n_giorni*daily_obs) 
+noiseTOT <- rep(noiseARMA,each=daily_obs) + noiseWN
+
+allNoise.plot(noiseARMA, noiseWN, output)
+
+output.final <- output + noiseTOT
+
+data <- create.data(output.final,input)
+
+# Studiamo il dataframe delle medie
+data.dm <- data.frame(Days = unique(data$Days))
+data.dm$output.mean <- apply(as.matrix(data.dm$Days),1,function(x) mean(data$output[data$Days == x])) 
+data.dm$output.mean.lag1 <-  c(NA,data.dm$output.mean[1:(nrow(data.dm)-1)])
+data.dm$output.mean.lag2 <-  c(rep(NA,2),data.dm$output.mean[1:(nrow(data.dm)-2)])
+cor(data.dm$output.mean[-1], data.dm$output.mean.lag1[-1])  ## 0.38 di correlazione.
+cor(data.dm$output.mean[-c(1,2)], data.dm$output.mean.lag2[-c(1,2)]) ## 0.20 di correlazione.
+# Un analista includerebbe questa informazione nel modello, una dipendenza che non dovrebbe esserci.
+
+# Includo nei dati la media del giorno precedente.
+data$output.l1 <- NA
+data$output.l2 <- NA
+for (i in unique(data$Days)) {
+  data$output.l1[data$Days == i] <- data.dm$output.mean.lag1[data.dm$Days == i]
+  data$output.l2[data$Days == i] <- data.dm$output.mean.lag2[data.dm$Days == i]
+}
+
+## Tutta la variabilità dell'errore precedente viene catturata dall'inclusione dei ritardi.
+# Proviamo con altri processi stazionari?
+
+
+## DATASET 4 - Processo non osservato più complesso.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(50)
+sd_noiseARMA <- sqrt(70)
+mu <- rep(0,nvar_input)
+Sigma <- diag(rep(1,nvar_input))
+
+set.seed(7014)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output <- lin.out(input)
+
+coef.ma <- round(runif(4),2)
+noiseARMA <- noise.ARMA(n = n_giorni, coefAR = c(), coefMA = coef.ma, d=0, sd=sd_noiseARMA)
+## Questo effetto dovrebbe essere più difficile da spiegare attraverso i ritardi.
+noiseARMA.plot(noiseARMA, p = 0, q = 4)
+
+## Per aggiungere degli errori all'interno della giornata.
+noiseWN <- noise.WN(n_giorni*daily_obs) 
+noiseTOT <- rep(noiseARMA,each=daily_obs) + noiseWN
+
+allNoise.plot(noiseARMA, noiseWN, output)
+
+output.final <- output + noiseTOT
+
+data <- create.data(output.final,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)  ## 0.7 del modello originale.
+
+## Com'è la correlazione?
+data.dm <- data.frame(Days = unique(data$Days))
+data.dm$output.mean <- apply(as.matrix(data.dm$Days),1,function(x) mean(data$output[data$Days == x])) 
+data.dm$output.mean.lag1 <-  c(NA,data.dm$output.mean[1:(nrow(data.dm)-1)])
+data.dm$output.mean.lag2 <-  c(rep(NA,2),data.dm$output.mean[1:(nrow(data.dm)-2)])
+cor(data.dm$output.mean[-1], data.dm$output.mean.lag1[-1])  ## 0.68 di correlazione.
+cor(data.dm$output.mean[-c(1,2)], data.dm$output.mean.lag2[-c(1,2)])# 0.44 di correlazione.
+
+
+## DATASET 5 - Processo non osservato ARMA(2,2), così combiniamo i problemi e vediamo che cosa viene.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(50)
+sd_noiseARMA <- sqrt(10)
+mu <- rep(0,nvar_input)
+
+set.seed(8869)
+Sigma <- get_Sigma(nvar_input, rho=0.15)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma$mat))
+output <- lin.out(input)
+
+## Per sporcare l'output, processo stazionario giornaliero.
+coef.MA <- round(runif(2),2)
+noiseARMA <- noise.ARMA(n = n_giorni, coefAR = c(0.6,0.3), coefMA = coef.MA, d=0, sd=sd_noiseARMA)
+noiseARMA.plot(noiseARMA, p = 2, q = 2)
+
+## Per aggiungere degli errori all'interno della giornata.
+noiseWN <- noise.WN(n_giorni*daily_obs) 
+noiseTOT <- rep(noiseARMA,each=daily_obs) + noiseWN
+
+allNoise.plot(noiseARMA, noiseWN, output)
+
+output.final <- output + noiseTOT
+
+data <- create.data(output.final,input)
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit)  ## R2 di 0.75.
+
+data.dm <- get_daily_means(data)
+data.dm$cor.l1  ## Forte correlazione ai primi ritardi.
+
+data$output.l1 <- NA
+data$output.l2 <- NA
+for (i in unique(data$Days)) {
+  data$output.l1[data$Days == i] <- data.dm$data$output.mean.lag1[data.dm$data$Days == i]
+  data$output.l2[data$Days == i] <- data.dm$data$output.mean.lag2[data.dm$data$Days == i]
+}
+plot <- output_plot(data)
+
+```
+
+```{r FUNZIONI stagionali}
+allNoise.stag.plot <- function(processo_latente, noiseWN, output) {
+  par(mfrow=c(2,1))
+  plot(1:length(processo_latente),processo_latente,ylab="", xlab="giorni", type="l")
+  title("Processo sottostante")
+  #plot(1:length(noiseWN),noiseWN,ylab="", xlab="giorni", type="l")
+  #title("Processo WN da aggiungere all'errore")
+  plot(1:length(output),output,ylab="", xlab="giorni", type="l")
+  title("Output")
+}
+
+all.plot <- function(processo_latente, noiseWN, output) {
+  par(mfrow=c(2,1))
+  plot(1:length(processo_latente),processo_latente,ylab="", xlab="giorni", type="l")
+  title("Processo sottostante")
+  #plot(1:length(noiseWN),noiseWN,ylab="", xlab="giorni", type="l")
+  #title("Processo WN da aggiungere all'errore")
+  plot(1:length(output),output,ylab="", xlab="giorni", type="l")
+  title("Output")
+}
+```
+
+```{r Simulazioni VARIAZIONI STAGIONALI NELL'ERRORE}
+sample(1000:10000, 1)
+
+## PRIMO DATASET - Andamento stagionale nel termine d'errore
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(25)
+sd_stag <- sqrt(20)
+mu <- rep(0,nvar_input)
+
+set.seed(6280)
+Sigma <- get_Sigma(nvar_input, rho=0.15)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma$mat))
+output <- lin.out(input)
+
+# Simulazione dell'andamento stagionale
+a <- 7
+Gamma <- c(sort(round(runif(a, min=0, max=100),2), decreasing =TRUE), sort(round(runif(24-a, min=0, max=75),2),decreasing=FALSE))
+Gamma <- Gamma - mean(Gamma)
+plot(1:24,Gamma)
+
+#Il numero di di valori di cui ho bisogno.
+n_gamma <- n_giorni/365*24 + 6
+for(i in 25:n_gamma) {
+    Gamma <- c(Gamma,-sum(Gamma[(i-23):(i - 1)]))
+}
+
+Gamma <- Gamma + rnorm(length(Gamma), sd = sd_stag)
+
+plot(1:length(Gamma),Gamma)
+
+x <- floor(rep(seq(1,365, length.out = 24),5) + rep(365*c(0,1,2,3,4), each=24))
+x <- c(c(-44,-29,-14),x,c(1840,1855,1870))
+fit = loess(Gamma ~ x, span=0.065, degree=2)
+  
+stag_latente <- predict(fit, data.frame(x = 1:n_giorni))
+  
+plot <- ggplot(data=data.frame(stag_latente = stag_latente, days = 1:n_giorni), aes(x=days, y = stag_latente)) + geom_line(stat="identity")
+plot
+
+noiseWN <- noise.WN(n_giorni*daily_obs) 
+noiseTOT <- rep(stag_latente, each = daily_obs) + noiseWN
+output.final <- output + noiseTOT
+
+allNoise.stag.plot(stag_latente, noiseWN, output.final)
+
+
+data <- create.data(output.final,input)
+plot <- output_plot(data)
+plot
+
+fit <- lm(output~., data = data[,-ncol(data)])
+summary(fit) ## 0.48 di R2 iniziale.
+
+
+## SECONDO DATASET - Dando la possibilità ai modelli di catturare la componente stagionale.
+# Sugli stessi dati di prima
+
+
+## Inseriamo una funzione quadratica e una dummy del tempo.
+data$day_of_year <- rep(rep(1:365,each=daily_obs),5) ## La stagionalità ha l'ordine corretto ora.
+data$day_of_year2 <- data$day_of_year^2
+# Lunghezza dei mesi
+m <- c(31,28,31,30,31,30,31,31,30,31,30,31)
+m1 <- c()
+for (i in 1:12) {
+  m1 <- c(m1,rep(i,m[i]))
+}
+
+data$month_of_year <- m1
+data$month_of_year <- factor(data$month_of_year)
+
+## Inserisco i ritardi
+data.dm <- get_daily_means(data)
+data.dm$cor.l1  ## Forte correlazione ai primi ritardi. 0.90.
+data.dm$data
+data$output.l1 <- NA
+data$output.l2 <- NA
+for (i in unique(data$Days)) {
+  data$output.l1[data$Days == i] <- data.dm$data$output.mean.lag1[data.dm$data$Days == i]
+  data$output.l2[data$Days == i] <- data.dm$data$output.mean.lag2[data.dm$data$Days == i]
+}
+plot <- output_plot(data)
+
+## Inserire ritardi ulteriori? Se il modello la cattura bene, non credo sia necessario.
+
+```
+
+```{r FUNZIONI VARIAZIONI STAZIONARIE nelle MEDIE}
+
+noise_ARMA <- function(n, coefAR, coefMA, d, sd) {
+  arima.sim(n = n, list(order = c(length(coefAR), d, length(coefMA)),ar = coefAR, ma = coefMA), sd = sd)
+}
+
+noiseARMA.plot <- function(noise, p =1, q=0) {
+  par(mfrow=c(3,1))
+  plot(x = 1:length(noise), y = noise, ylab="", xlab="giorni", type ="l")
+  title(paste0("Grafico dell'errore ARMA(",p,",",q,")"))
+  acf(noise, lag.max=length(noise)/4)
+  pacf(noise,lag.max=length(noise)/4)
+}
+
+input_ARMA <- function(coefAR, coefMA, d, sd_ARMA, arma_var) {
+  
+  arma_average <- noise_ARMA(n_giorni, coefAR, coefMA, d, sd_ARMA)
+  noiseARMA.plot(arma_average, p = length(coefAR), q = length(coefMA))
+  
+  
+  plot <- ggplot(data=data.frame(arma = arma_average, days = 1:n_giorni), aes(x=days, y =arma_average)) + geom_line(stat="identity")
+  
+  mu <- rep(0,nvar_input)
+  input <- NULL
+  for (j in 1:n_giorni) {
+    mu[arma_var] <- arma_average[j]
+    input <- rbind(input,mvrnorm(n = daily_obs, mu = mu, Sigma = Sigma))
+  }
+  
+  return(list(input=input, plot=plot, arma = arma_average))
+
+}
+
+
+input_stag <- function(sd_stag, stag_var, n_anni = 6) {
+  
+  ## Generiamo 24 valori.
+  a <- 8
+  Gamma <- c(sort(round(runif(a, min=0, max=30),2), decreasing =FALSE), sort(round(runif(24-a, min=0, max=20),2),decreasing=TRUE))
+  Gamma <- Gamma - mean(Gamma)
+  plot(1:24,Gamma)
+
+  #Il numero di di valori di cui ho bisogno.
+  n_gamma <- n_giorni/365*24 + 6
+  for(i in 25:n_gamma) {
+      Gamma <- c(Gamma,-sum(Gamma[(i-23):(i - 1)]))
+  }
+  
+  Gamma <- Gamma + rnorm(length(Gamma), sd=sd_stag)
+  plot(1:length(Gamma),Gamma)
+
+  x <- floor(rep(seq(1,365, length.out = 24),n_anni) + rep(365*c(0:(n_anni-1)), each=24))
+  x <- c(c(-44,-29,-14),x,c(1840,1855,1870))
+  fit = loess(Gamma ~ x, span=0.065, degree=2)
+  
+
+
+  stag_average <- predict(fit, data.frame(x = 1:n_giorni))
+  
+  plot <- ggplot(data=data.frame(stag_average = stag_average, days = 1:n_giorni), aes(x=days, y = stag_average)) + geom_line(stat="identity")
+  
+  mu <- rep(0,nvar_input)
+  input <- NULL
+  for (j in 1:n_giorni) {
+    mu[stag_var] <- stag_average[j]
+    input <- rbind(input,mvrnorm(n = daily_obs, mu = mu, Sigma = Sigma))
+  }
+  
+  return(list(input=input, plot=plot, stag = stag_average))
+}
+
+all.plot <- function(processo_latente, noiseWN, output) {
+  par(mfrow=c(3,1))
+  plot(1:length(processo_latente),processo_latente,ylab="", xlab="giorni", type="l")
+  title("Processo sottostante")
+  plot(1:length(noiseWN),noiseWN,ylab="", xlab="giorni", type="l")
+  title("Processo WN da aggiungere all'errore")
+  plot(1:length(output),output,ylab="", xlab="giorni", type="l")
+  title("Output")
+}
+
+```
+
+```{r Simulazioni VARIAZIONI STAZIONARIE NELLE MEDIE}
+sample(1000:10000,1)
+
+## PRIMO DATASET - Andamento ARMA nella media degli input.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(800)
+sd_ARMA <- sqrt(2)
+
+set.seed(5765)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+coefAR <- c(0.6, 0.3)
+coefMA <- c(0.8,0.5)
+# Sottocampione di variabili a cui dare andamento arma.
+arma_var <- sample(1:nvar_input, floor(nvar_input*1))
+
+input <- input_ARMA(coefAR, coefMA, d=0, sd_ARMA, arma_var = arma_var)
+arma_ave <- input$arma
+arma_plot <- input$plot
+input <- as.data.frame(input$input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output <- lin.out(input)
+output.final <- output + noiseWN
+allNoise.plot(arma_ave, noiseWN, output)
+allNoise.plot(arma_ave, noiseWN, output.final)
+  
+data <- create.data(output.final,input)
+plot <- output_plot(data)
+plot
+
+
+# C'è correlazione temporale?
+data.dm <- get_daily_means(data)
+data.dm$cor.l1   ## 0.95 di correlazione giornaliera.
+data.dm$cor.l2  ## 0.89 di correlazione al secondo ritardo.
+
+data$day_of_year <- rep(rep(1:365,each=daily_obs),5)
+data$day_of_year2 <- data$day_of_year^2
+
+# Lunghezza dei mesi
+m <- c(31,28,31,30,31,30,31,31,30,31,30,31)
+m1 <- c()
+for (i in 1:12) {
+  m1 <- c(m1,rep(i,m[i]))
+}
+
+data$month_of_year <- rep(m1, each =daily_obs)
+data$month_of_year <- factor(data$month_of_year)
+
+## Inserisco i ritardi
+data$output.l1 <- NA
+data$output.l2 <- NA
+for (i in unique(data$Days)) {
+  data$output.l1[data$Days == i] <- data.dm$data$output.mean.lag1[data.dm$data$Days == i]
+  data$output.l2[data$Days == i] <- data.dm$data$output.mean.lag2[data.dm$data$Days == i]
+}
+```
+
+```{r Simulazioni VARIAZIONI STAGIONALI NELLE MEDIE}
+sample(1000:10000,1)
+## PRIMO DATASET - Andamento stagionale nella media degli input.
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(300)
+sd_stag <- sqrt(15)
+
+set.seed(1557)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+
+# Sottocampione di variabili a cui dare andamento stagionale
+stag_var <- sample(1:nvar_input, floor(nvar_input*1))
+
+input <- input_stag(sd_stag, stag_var = stag_var, n_anni = 5)
+
+stag_plot <- input$plot
+stag <- input$stag
+input <- as.data.frame(input$input)
+output <- lin.out(input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output.final <- output + noiseWN
+
+data <- create.data(output.final,input)
+plot <- output_plot(data)
+all.plot(stag, noiseWN, output.final)
+all.plot(stag, noiseWN, output)
+
+
+## SECONDO DATASET - AGGIUGERE LA DIPENDENZA TEMPORALE
+data.dm <- get_daily_means(data)
+data.dm$cor.l1   ## 0.95 di correlazione giornaliera.
+data.dm$cor.l2  ## 0.89 di correlazione al secondo ritardo.
+
+data$day_of_year <- rep(rep(1:365,each=daily_obs),5) ## La stagionalità ha l'ordine corretto ora.
+data$day_of_year2 <- data$day_of_year^2
+
+# Lunghezza dei mesi
+m <- c(31,28,31,30,31,30,31,31,30,31,30,31)
+m1 <- c()
+for (i in 1:12) {
+  m1 <- c(m1,rep(i,m[i]))
+}
+
+data$month_of_year <- rep(m1, each =daily_obs)
+data$month_of_year <- factor(data$month_of_year)
+
+## Inserisco i ritardi
+data$output.l1 <- NA
+data$output.l2 <- NA
+for (i in unique(data$Days)) {
+  data$output.l1[data$Days == i] <- data.dm$data$output.mean.lag1[data.dm$data$Days == i]
+  data$output.l2[data$Days == i] <- data.dm$data$output.mean.lag2[data.dm$data$Days == i]
+}
+
+
+
+
+
+
+
+
+## TERZO DATASET - Ritardi stagionali
+nvar_input <- 80
+n_giorni <- 365*6
+daily_obs <- 10
+sd_WN <- sqrt(160)
+sd_stag <- sqrt(12)
+
+set.seed(6044)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+
+# Sottocampione di variabili a cui dare andamento stagionale
+stag_var <- sample(1:nvar_input, floor(nvar_input*1))
+
+input <- input_stag(sd_stag, stag_var = stag_var, n_anni = 6)
+
+stag_plot <- input$plot
+stag <- input$stag
+input <- as.data.frame(input$input)
+output <- lin.out(input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output.final <- output + noiseWN
+
+data <- create.data(output.final,input)
+plot <- output_plot(data)
+plot
+all.plot(stag, noiseWN, output.final)
+all.plot(stag, noiseWN, output)
+
+## Aggiungiamo i ritardi stagionali.
+data.dm <- get_daily_means(data)
+data.dm$cor.l1   ## 0.85 di correlazione giornaliera.
+data.dm$cor.l2  ## 0.84 di correlazione al secondo ritardo.
+
+data$day_of_year <- rep(rep(1:365,each=daily_obs),6) ## La stagionalità ha l'ordine corretto ora.
+data$day_of_year2 <- data$day_of_year^2
+
+# Lunghezza dei mesi
+m <- c(31,28,31,30,31,30,31,31,30,31,30,31)
+m1 <- c()
+for (i in 1:12) {
+  m1 <- c(m1,rep(i,m[i]))
+}
+
+data$month_of_year <- rep(m1, each =daily_obs)
+data$month_of_year <- factor(data$month_of_year)
+
+
+
+# Controlliamo quanto sono correlati i ritardi stagionali.
+data.dm$data
+data.dm$data$lags <- NA
+for (i in 366:max(data.dm$data$Days)) {
+  data.dm$data$lags[data.dm$data$Days == (i)] <- data.dm$data$output.mean[data.dm$data$Days == (i - 365)]
+}
+cor(data.dm$data[data.dm$data$Days>=366,c("output.mean","lags")])  ## C'è una forte correlazione al ritardo stagionale (365).
+
+
+## Inserisco i ritardi, anche stagionali
+data$output.l1 <- NA
+data$output.l2 <- NA
+data$output.ls <- NA
+for (i in unique(data$Days)) {
+  data$output.l1[data$Days == i] <- data.dm$data$output.mean.lag1[data.dm$data$Days == i]
+  data$output.l2[data$Days == i] <- data.dm$data$output.mean.lag2[data.dm$data$Days == i]
+}
+
+## Inserisco i ritardi stagionali.
+for (i in 366:max(data$Days)) {
+  data$output.ls[data$Days == i] <- data.dm$data$output.mean[data.dm$data$Days == (i - 365)]
+}
+
+# Togliamo il primo anno, che serviva per il lag stagionale.
+data <- data[data$Days>=366,]
+data$Days <- rep(1:1825, each=daily_obs)
+
+```
+
+```{r Stagionalita formula}
 ## Processo stagionale nella componente di errore.
 #https://stats.stackexchange.com/questions/125946/generate-a-time-series-comprising-seasonal-trend-and-remainder-components-in-r
 ## 3 componenti: latent seasonal, latent drift, latent level. Sommano alla serie osservata.
 # Latent drift: Beta_t = Beta_t-1 + gugma_t
 # Latent seasonality: Gamma_t = - Gamma_t-1 - ..... - Gamma_t-s + omega_t
 # Latent level: Mu_t = Mu_t-1 + Beta_t-1 + epsilon_t
+```
 
-## Uso questo rispetto ad un modello SARIMA perché ho osservazioni giornaliere, e la simulazione deve essere stagionale di mese in mese.
+```{r FUNZIONI ANDAMENTO negli EFFETTI}
+## Genera un ARMA
+noise.WN <- function(n) {
+  rnorm(n = n_giorni*daily_obs, mean = 0, sd = sd_WN)
+}
 
-## Latent drift non è necessario, perchè vorrei un comportamento stazionario.
-## Andamento stagionale, frequenza 12 mesi, 30 giorni per mese.
-set.seed(5787)
-Gamma <- noise.ARMA(n = 12, coefAR = c(0.5), coefMA = c(0), d=0, sd =10)
-plot(Gamma,type="l")
+noise_ARMA <- function(n, coefAR, coefMA, d, sd) {
+  arima.sim(n = n, list(order = c(length(coefAR), d, length(coefMA)),ar = coefAR, ma = coefMA), sd = sd)
+}
 
-## Questi sono i primi, poi abbiamo le perturbazioni.
-n_mesi <- n_giorni/30
-for (j in (12+1):ceiling(n_mesi)) {
+processo_STAG <- function(n,sd_stag,a) {
+  ## Generiamo 24 valori.
+  Gamma <- c(sort(round(runif(a, min=0, max=2.8),2), decreasing =FALSE), sort(round(runif(24-a, min=0, max=1.6),2),decreasing=TRUE))
+  Gamma <- Gamma - mean(Gamma)
+  plot(1:24,Gamma)
+
+  #Il numero di di valori di cui ho bisogno.
+  n_gamma <- n_giorni/365*24 + 6
+  for(i in 25:n_gamma) {
+      Gamma <- c(Gamma,-sum(Gamma[(i-23):(i - 1)]))
+  }
   
+  Gamma <- Gamma + rnorm(length(Gamma), sd=sd_stag)
+
+  x <- floor(rep(seq(1,365, length.out = 24),n_anni) + rep(365*c(0:(n_anni-1)), each=24))
+  x <- c(c(-44,-29,-14),x,c(1840,1855,1870))
+  fit = loess(Gamma ~ x, span=0.065, degree=2)
+  
+
+
+  stag_average <- predict(fit, data.frame(x = 1:n_giorni))
+  return(stag_average)
+}
+
+get_processi_STAG <- function(nProc, n,sd) {
+  processi <- matrix(NA, nrow=nProc, ncol=n)
+  as <- sample(2:22, nProc, replace=TRUE)
+  
+  for(i in 1:nProc) {
+    processi[i,] <- processo_STAG(n, sd = sd,as[i])
+  }
+  return(processi)
+}
+
+get_processi_ARMA <- function(nProc, n, coefAR, coefMA,d,sd) {
+  processi <- matrix(NA, nrow=nProc, ncol=n)
+  for(i in 1:nProc) {
+    processi[i,] <- noise_ARMA(n, coefAR,coefMA,d,sd)
+  }
+  return(processi)
+}
+
+
+
+
+lin.out.variabile <- function(input, processi, unstable_vars) {
+  
+  coef.main <- runif(ncol(input) + 1, min = -5, max = 5)
+  coef.int <- runif(length(unstable_vars), min = -0.75, max = 0.75)
+  
+  coefficienti <- matrix(rep(coef.main[2:(ncol(input)+1)], each=n_giorni), nrow=ncol(input), ncol=n_giorni, byrow = TRUE)
+  
+    
+  for (j in 1:nrow(processi)) {
+    processi[j,] <- processi[j,] * coef.int[j]
+  }
+  
+  coefficienti[unstable_vars,] <- coefficienti[unstable_vars,] + processi
+  
+  output <- rep(NA, n_giorni*daily_obs)
+  
+  for (i in 1:n_giorni) {
+      output[((i-1)*daily_obs + 1):(i*daily_obs)] <- as.matrix(input[((i-1)*daily_obs + 1):(i*daily_obs),]) %*% as.matrix(coefficienti[,i])
+  }
+
+  return(list(output = output, coefficienti = coefficienti,interazioni = coef.int))
+}
+
+
+coeff_plot <- function(coefficienti) {
+  
+  #coefficienti <- output$coefficienti
+  coeff.df <- as.data.frame(t(coefficienti))
+  coeff.df$Days <- 1:n_giorni
+  
+  coeff.for.plot <- coeff.df[,c("V1","Days")]
+  colnames(coeff.for.plot) <- c("Coeff","Days")
+  coeff.for.plot$Var <- "V1"
+  
+  if(nvar_input >=2) {
+  for ( i in 2:(ncol(coeff.df)-1) ) {
+    tmp <- cbind(coeff.df[,c(i,ncol(coeff.df))],colnames(coeff.df)[i])
+    colnames(tmp) <- c("Coeff","Days","Var")
+    coeff.for.plot <- rbind(coeff.for.plot, tmp)
+  }
+  }
+  
+  coeff.for.plot$Var <- factor(coeff.for.plot$Var, levels = colnames(coeff.df)[-ncol(coeff.df)])
+  
+  plot <- ggplot(coeff.for.plot, aes(x = Days, y=Coeff, color = Var)) + geom_line() + labs(title="Coefficienti simulati - andamento giornaliero", x="giorni",y ="coefficienti") + theme_bw() + theme(panel.border = element_rect(color = "black", linewidth = 0.3, fill = NA))
+  
+  return(list(plot=plot))
 }
 
 
 ```
 
-```{r Simulazioni - DATA DRIFT}
+```{r Simulazione - ANDAMENTI NEGLI EFFETTI DEI COEFFICIENTI}
+sample(1000:10000, 1)
+
+
+# PRIMO DATASET - Interazione con effetto ARMA latente.
+nvar_input <- 80
+n_giorni <- 1825
+n_anni <- 5
+daily_obs <- 10
+sd_WN <- sqrt(80)
+sd_noiseARMA <- sqrt(0.1)
+sd_noiseARMA <- sqrt(1)
+mu <- rep(0,nvar_input)
+
+set.seed(7014)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+unstable_vars <- sample(1:nvar_input,nvar_input*1)
+processi <- get_processi_ARMA(length(unstable_vars),n_giorni, coefAR = c(0.6,0.3), coefMA = c(), d=0, sd_noiseARMA)
+
+plot(processi[1,], type="l")
+plot(processi[2,], type="l")
+output <- lin.out.variabile(input, processi, unstable_vars)
+output$interazioni
+coeff.plot <- coeff_plot(output$coefficienti)$plot
+coeff.plot
+
+## Combino l'output con il noise.
+noise <- noise.WN(n_giorni*daily_obs)
+output.final <- output$output + noise
+data <- create.data(output.final, input)
+output_plot(data)
+
+## Aggiungiamo al dataset le variabili per catturate questa cosa.
+## Magari il giorno dell'anno.
+data.dm <- get_daily_means(data)
+data.dm$cor.l1   ## Non c'è correlazione ai ritardi.
+data.dm$cor.l2  ## 
+
+data$day_of_year <- rep(rep(1:365,each=daily_obs),5) ## La stagionalità ha l'ordine corretto ora.
+data$day_of_year2 <- data$day_of_year^2
+
+# Lunghezza dei mesi
+m <- c(31,28,31,30,31,30,31,31,30,31,30,31)
+m1 <- c()
+for (i in 1:12) {
+  m1 <- c(m1,rep(i,m[i]))
+}
+
+data$month_of_year <- rep(m1, each =daily_obs)
+data$month_of_year <- factor(data$month_of_year)
+
+all.plot(processi[1,], noise, output$output)
+all.plot(processi[1,], noise, output.final)
+
+
+
+# SECONDO DATASET - Interazione con effetto STAGIONALE latente.
+nvar_input <- 80
+n_giorni <- 1825
+n_anni = 5
+daily_obs <- 10
+#daily_obs <- 40
+sd_WN <- sqrt(80)
+sd_stag <- sqrt(0.12)
+mu <- rep(0,nvar_input)
+
+set.seed(3202)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+unstable_vars <- sample(1:nvar_input,nvar_input*0.5)
+processi <- get_processi_STAG(length(unstable_vars),n_giorni, sd_stag)
+
+plot(processi[1,], type="l")
+plot(processi[2,], type="l")
+
+output <- lin.out.variabile(input, processi, unstable_vars)
+output$interazioni
+coeff.plot <- coeff_plot(output$coefficienti)$plot
+coeff.plot
+
+## Combino l'output con il noise.
+noise <- noise.WN(n_giorni*daily_obs)
+output.final <- output$output + noise
+data <- create.data(output.final, input)
+output_plot(data)
+
+data.dm <- get_daily_means(data)
+data.dm$cor.l1   ## Non c'è correlazione ai ritardi.
+data.dm$cor.l2  ## 
+
+data$day_of_year <- rep(rep(1:365,each=daily_obs),5) ## La stagionalità ha l'ordine corretto ora.
+data$day_of_year2 <- data$day_of_year^2
+
+# Lunghezza dei mesi
+m <- c(31,28,31,30,31,30,31,31,30,31,30,31)
+m1 <- c()
+for (i in 1:12) {
+  m1 <- c(m1,rep(i,m[i]))
+}
+
+data$month_of_year <- rep(m1, each =daily_obs)
+data$month_of_year <- factor(data$month_of_year)
+```
+
+```{r Idee e teorie per il concept drift}
+
+## Devo simulare dei drift adesso.
+## Data drift e concept drift:
+#  - Data drift sono cambiamenti in p(X)
+#  - Concept drift sono cambiamenti nel tempo di P(Y|X)
+
+## Tipologie di drift:
+#  - Sudden drift, cambiamento repentino nelle regole
+#  - Gradual drift, un sistema di regole ne rimpiazza un altro in modo graduale.
+#  - Incremental drift, un sistema di regole si trasforma, nel tempo, in un altro.
+#  - Drift ricorrente, un sistema di regole eventualmente ritorna.
+
+# Incremental drift: La regola segue un andamento graduale. Esempio: a_t = a_t-1 + i/(10^4.7)*logsig(a_t-1)
+# Sudden shift è improvviso, gradual drift le regole hanno probabilità di apparire che varia nel tempo.
+# Drift ricorrente è il più strano.
+
+# Aspetti importanti: il fatto che il drift inizi nella fase di training è un aspetto rilevante. Altrimenti PER FORZA i modelli si rompono.
 
 ```
 
+```{r FUNZIONI per DATA DRIFT}
+noise.WN <- function(n) {
+  rnorm(n = n, sd = sd_WN)
+}
+
+# Shock esponenziale giornaliero.
+shock.exp <- function(n_giorni,a,b,c) {
+  shock <- rep(0,n_giorni)
+  shock[1:n_giorni >= a] <- 0 + c*exp(b*(a:n_giorni-a))
+  shock
+}
+
+incremental.shift <- function(n_giorni, M, a, b) {
+  shift <- rep(0,n_giorni)
+  shift[1:n_giorni >= a] <- M*(1-exp(b*(a:n_giorni - a)))
+  shift
+}
+
+gradual.shift <- function(n_giorni, length, a, b) {
+  shift <- rep(0,n_giorni)
+  p <- seq(0,1,length.out = length)
+  levels <- c()
+  for(prob in p) {
+    levels <- c(levels,sample(c(0,b),1,replace=TRUE,prob = c(1-prob,prob)))
+  }
+  shift[a:(a+length - 1)] <- levels
+  shift[(a+length):n_giorni] <- b
+  shift
+}
+
+lin.out <- function(input) {
+  ## coef[1] è l'intercetta, il resto i coefficienti.
+  coef <- runif(ncol(input) + 1, min = -5, max = 5)
+  output <- apply(input,1,function(x) coef[1] + t(as.matrix(x))%*%as.matrix(coef[2:length(coef)]))
+  cat("\nMain effects: ",coef)
+  return(output)
+}
+
+output.plot <- function(noiseWN, output, output.final) {
+  par(mfrow=c(3,1))
+  plot(1:length(noiseWN),noiseWN,ylab="", xlab="giorni", type="l")
+  title("Termine d'errore")
+  plot(1:length(output),output,ylab="", xlab="giorni", type="l")
+  title("Combinazione lineare degli input")
+  plot(1:length(output.final),output.final,ylab="", xlab="giorni", type="l")
+  title("Output finale")
+}
+```
+
+```{r Simulazioni - DATA DRIFT nelle NON OSSERVATE}
+# Data drift nelle quantità osservate e non osservate:
+# Iniziamo dal sudden drift nella componente non osservata.
+sample(1000:10000,1)
+
+
+## PRIMO DATASET - SUDDEN SHIFT NELLA COMPONENTE NON OSSERVATA - FUORI DAL TRAINING SET
+nvar_input <- 20
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+#Giorno dello shift
+shift_day <- 1700
+shift_intensity <- 10
+
+set.seed(9857)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+## Voglio generare l'errore in modo che abbia un balzo verso l'alto all'improvviso.
+# Genero un processo con media 0 negli errori, che poi aumenta da un certo istante temporale in poi.
+output <- lin.out(input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+obs_shifted <- (shift_day*daily_obs + 1):(n_giorni*daily_obs)
+noiseWN[obs_shifted] <- noiseWN[obs_shifted] + shift_intensity
+output.final <- output + noiseWN
+
+output.plot(noiseWN,output,output.final)
+data <- create.data(output.final,input,daily_obs)
+
+
+## SECONDO DATASET - SUDDEN SHIFT NELLA COMPONENTE NON OSSERVATA con RIASSORBIMENTO - FUORI DAL TRAINING SET
+nvar_input <- 5
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+# Giorno dello shift
+# Formula impulso exp -> 1 + c*exp(b*(t-a))*I(t>a)
+# a = giorno dello shift
+# b = decadimento dello shift
+# c = intensità dello shift
+a <- 1200
+c <- 12
+b <- -0.008
+
+# Usato lo stesso seed per confrontare le reazioni sullo stesso dataset
+set.seed(9857)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+## Voglio generare l'errore in modo che abbia un balzo verso l'alto all'improvviso.
+# Genero un processo con media 0 negli errori, che poi aumenta da un certo istante temporale in poi.
+output <- lin.out(input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+shockExp <- shock.exp(n_giorni,a,b,c)
+plot(shockExp, type="l")
+noiseWN_shocked <- noiseWN + rep(shockExp,each=daily_obs)
+output.final <- output + noiseWN_shocked
+
+output.plot(noiseWN_shocked,output,output.final)
+
+
+## TERZO e QUARTO DATASET - Stessi shock, ma all'interno del training.
+# Semplicemente si tratta di modificare, rispettivamente, shift_day ed a.
+
+
+
+
+## QUINTO DATASET - INCREMENTAL DRIFT nella non osservata - FUORI DAL TRAINING SET
+# Devo sommare un processo che varia nel tempo alla componente non osservata.
+nvar_input <- 5
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+a <- 900
+b <- -0.004
+M <- 20  ## Il plateau.
+
+set.seed(9857)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+## Voglio generare l'errore in modo che abbia un balzo verso l'alto all'improvviso.
+# Genero un processo con media 0 negli errori, che poi aumenta da un certo istante temporale in poi.
+output <- lin.out(input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+incremental_shift <- incremental.shift(n_giorni, M, a, b)
+plot(incremental_shift, type="l")
+
+noiseWN_shifted <- noiseWN + rep(incremental_shift, each=daily_obs)
+output.final <- output + noiseWN_shifted
+output.plot(noiseWN_shifted,output,output.final)
+
+## SESTO DATASET - INCREMENTAL DRIFT nel TRAINING SET.
+
+
+## SETTIMO DATASET - GRADUAL DRIFT fuori dal TRAINING SET.
+nvar_input <- 5
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+a <- 900
+b <- -20
+length <- 500 # La durata dello shift.
+
+set.seed(9857)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+output <- lin.out(input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+gradual_shift <- gradual.shift(n_giorni, length, a, b)
+plot(gradual_shift, type="l")
+noiseWN_shifted <- noiseWN + rep(gradual_shift, each=daily_obs)
+output.final <- output + noiseWN_shifted
+output.plot(noiseWN_shifted,output,output.final)
+
+
+## OTTAVO DATASET - GRADUAL SHIFT nel TRAINING SET.
+
+## Aspettiamo per il recurrent shift.
+
+```
+
+```{r FUNZIONI per DATA DRIFT nelle OSSERVATE}
+
+noise.WN <- function(n) {
+  rnorm(n = n, sd = sd_WN)
+}
+
+# Shock esponenziale giornaliero.
+shock.exp <- function(n_giorni,a,b,c) {
+  shock <- rep(0,n_giorni)
+  shock[1:n_giorni >= a] <- 0 + c*exp(b*(a:n_giorni-a))
+  shock
+}
+
+incremental.shift <- function(n_giorni, M, a, b) {
+  shift <- rep(0,n_giorni)
+  shift[1:n_giorni >= a] <- M*(1-exp(b*(a:n_giorni - a)))
+  shift
+}
+
+gradual.shift <- function(n_giorni, length, a, b) {
+  shift <- rep(0,n_giorni)
+  p <- seq(0,1,length.out = length)
+  levels <- c()
+  for(prob in p) {
+    levels <- c(levels,sample(c(0,b),1,replace=TRUE,prob = c(1-prob,prob)))
+  }
+  shift[a:(a+length - 1)] <- levels
+  shift[(a+length):n_giorni] <- b
+  shift
+}
+
+
+input_sudden_shift <- function(shifted_var,n_giorni, a, b) {
+  
+  shift <- rep(0,n_giorni)
+  shift[a:n_giorni] <- b
+  
+  plot <- ggplot(data=data.frame(y = shift, days = 1:n_giorni), aes(x=days, y =y)) + geom_line(stat="identity")
+  
+  mu <- rep(0,nvar_input)
+  input <- NULL
+  for (j in 1:n_giorni) {
+    mu[shifted_var] <- shift[j]
+    input <- rbind(input,mvrnorm(n = daily_obs, mu = mu, Sigma = Sigma))
+  }
+  
+  return(list(input=input, plot=plot, shift = shift))
+}
+
+input_sudden_shift_exp <- function(shifted_var,n_giorni, a, b, c) {
+  
+  shift <- shock.exp(n_giorni,a,b,c)
+  
+  plot <- ggplot(data=data.frame(y = shift, days = 1:n_giorni), aes(x=days, y =y)) + geom_line(stat="identity")
+  
+  mu <- rep(0,nvar_input)
+  input <- NULL
+  for (j in 1:n_giorni) {
+    mu[shifted_var] <- shift[j]
+    input <- rbind(input,mvrnorm(n = daily_obs, mu = mu, Sigma = Sigma))
+  }
+  
+  return(list(input=input, plot=plot, shift = shift))
+}
+
+lin.out <- function(input) {
+  ## coef[1] è l'intercetta, il resto i coefficienti.
+  coef <- runif(ncol(input) + 1, min = -5, max = 5)
+  output <- apply(input,1,function(x) coef[1] + t(as.matrix(x))%*%as.matrix(coef[2:length(coef)]))
+  cat("\nMain effects: ",coef)
+  return(output)
+}
+
+```
+
+```{r Simulazioni - DATA DRIFT nelle OSSERVATE}
+
+## PRIMO DATASET - SUDDEN SHIFT nelle MEDIE - non riassorbimento - FUORI DAL TRAINING.
+nvar_input <- 20
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+#Giorno dello shift
+a <- 1200
+b <- 15
+
+set.seed(1506)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+shifted_var <- sample(1:nvar_input,nvar_input*1)
+input <- input_sudden_shift(shifted_var, n_giorni, a, b)
+## Voglio generare l'errore in modo che abbia un balzo verso l'alto all'improvviso.
+# Genero un processo con media 0 negli errori, che poi aumenta da un certo istante temporale in poi.
+output <- lin.out(input$input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output.final <- output + noiseWN
+
+output.plot(noiseWN,output,output.final)
+data <- create.data(output.final,input$input)
+
+## SECONDO DATASET - SUDDEN SHIFT nelle MEDIE - FUORI dal TRAINING
+nvar_input <- 5
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+#Giorno dello shift
+a <- 1200
+c <- 12
+b <- -0.004
+
+set.seed(1506)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+shifted_var <- sample(1:nvar_input,nvar_input*1)
+input <- input_sudden_shift_exp(shifted_var, n_giorni, a, b, c)
+input$plot
+
+## Voglio generare l'errore in modo che abbia un balzo verso l'alto all'improvviso.
+# Genero un processo con media 0 negli errori, che poi aumenta da un certo istante temporale in poi.
+output <- lin.out(input$input)
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output.final <- output + noiseWN
+
+output.plot(noiseWN,output,output.final)
+
+
+## TERZO e QUARTO DATASET - SUDDEN SHIFT nelle MEDIE - nel TRAINING
+a <- 450
+
+
+## QUINTO DATASET - INCREMENTAL DRIFT e GRADUAL DRIFT
+
+```
+
+```{r FUNZIONI per CONCEPT DRIFT}
+
+create.data <- function(output, input, daily_obs) {
+  data <- cbind(input,output,rep(1:n_giorni,each=daily_obs))
+  colnames(data)[ncol(data)] <- "Days"
+  return(data)
+}
+
+coeff_plot <- function(coefficienti) {
+  
+  #coefficienti <- output$coefficienti
+  coeff.df <- as.data.frame(t(coefficienti))
+  coeff.df$Days <- 1:n_giorni
+  
+  coeff.for.plot <- coeff.df[,c("V1","Days")]
+  colnames(coeff.for.plot) <- c("Coeff","Days")
+  coeff.for.plot$Var <- "V1"
+  
+  if(nvar_input >=2) {
+  for ( i in 2:(ncol(coeff.df)-1) ) {
+    tmp <- cbind(coeff.df[,c(i,ncol(coeff.df))],colnames(coeff.df)[i])
+    colnames(tmp) <- c("Coeff","Days","Var")
+    coeff.for.plot <- rbind(coeff.for.plot, tmp)
+  }
+  }
+  
+  coeff.for.plot$Var <- factor(coeff.for.plot$Var, levels = colnames(coeff.df)[-ncol(coeff.df)])
+  
+  plot <- ggplot(coeff.for.plot, aes(x = Days, y=Coeff, color = Var)) + geom_line() + labs(title="Coefficienti simulati - andamento giornaliero", x="giorni",y ="coefficienti") + theme_bw() + theme(panel.border = element_rect(color = "black", linewidth = 0.3, fill = NA))
+  
+  return(list(plot=plot))
+}
+
+
+lin.out.sudden.shift <- function(input, a) {
+  # Prima regola
+  coef.main1 <- runif(ncol(input) + 1, min = -5, max = 5)
+  # Seconda regola
+  coef.main2 <- runif(ncol(input), min = -5, max = 5)
+  
+  coefficienti <- matrix(rep(coef.main1[2:(ncol(input)+1)], each=n_giorni), nrow=ncol(input), ncol=n_giorni, byrow = TRUE)
+  
+  # Dal giorno a, i coefficienti cambiano.
+  coefficienti[,a:n_giorni] <- matrix(rep(coef.main2, each = length(a:n_giorni)),byrow=TRUE,nrow=ncol(input), ncol=length(a:n_giorni))
+  
+  output <- rep(NA, n_giorni*daily_obs)
+  
+  for (i in 1:n_giorni) {
+      output[((i-1)*daily_obs + 1):(i*daily_obs)] <- as.matrix(input[((i-1)*daily_obs + 1):(i*daily_obs),]) %*% as.matrix(coefficienti[,i])
+  }
+
+  return(list(output = output, coefficienti = coefficienti))
+  
+}
+
+lin.out.incremental.shift <- function(input, a, duration) {
+  
+  # Prima regola
+  coef.main1 <- runif(ncol(input) + 1, min = -5, max = 5)
+  # Seconda regola
+  coef.main2 <- runif(ncol(input), min = -5, max = 5)
+  
+  coefficienti <- matrix(rep(coef.main1[2:(ncol(input)+1)], each=n_giorni), nrow=ncol(input), ncol=n_giorni, byrow = TRUE)
+  
+  # Devo preparare un percorso che mi porta al secondo coefficiente.
+  coefficienti[,a:(a + duration - 1)] <- t(apply(cbind(coef.main1[-1],coef.main2),1,function(x) seq(x[1],x[2],length.out=duration)))
+  
+  coefficienti[,(a + duration):n_giorni] <- matrix(rep(coef.main2, each=length((a + duration):n_giorni)), nrow=ncol(input), ncol=length((a + duration):n_giorni), byrow = TRUE)
+  
+  output <- rep(NA, n_giorni*daily_obs)
+  
+  for (i in 1:n_giorni) {
+      output[((i-1)*daily_obs + 1):(i*daily_obs)] <- as.matrix(input[((i-1)*daily_obs + 1):(i*daily_obs),]) %*% as.matrix(coefficienti[,i])
+  }
+
+  return(list(output = output, coefficienti = coefficienti))
+}
+
+
+lin.out.gradual.shift <- function(input, a, duration) {
+  
+  # Prima regola
+  coef.main1 <- runif(ncol(input) + 1, min = -5, max = 5)
+  # Seconda regola
+  coef.main2 <- runif(ncol(input), min = -5, max = 5)
+  
+  coefficienti <- matrix(rep(coef.main1[2:(ncol(input)+1)], each=n_giorni), nrow=ncol(input), ncol=n_giorni, byrow = TRUE)
+  
+  # Devo preparare un percorso che mi porta al secondo coefficiente.
+  coefficienti[,a:(a + duration - 1)] <- t(apply(cbind(coef.main1[-1],coef.main2),1,function(x) seq(x[1],x[2],length.out=duration)))
+  
+  coefficienti[,(a + duration):n_giorni] <- matrix(rep(coef.main2, each=length((a + duration):n_giorni)), nrow=ncol(input), ncol=length((a + duration):n_giorni), byrow = TRUE)
+  
+  output <- rep(NA, n_giorni*daily_obs)
+  
+  for (i in 1:n_giorni) {
+      output[((i-1)*daily_obs + 1):(i*daily_obs)] <- as.matrix(input[((i-1)*daily_obs + 1):(i*daily_obs),]) %*% as.matrix(coefficienti[,i])
+  }
+
+  return(list(output = output, coefficienti = coefficienti))
+}
+
+
+```
+
+```{r CONCEPT DRIFT}
+
+# Cambio delle regole p(Y|X).
+
+## PRIMO DATASET - SUDDEN DRIFT.
+nvar_input <- 2
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+#Giorno dello shift
+a <- 1200
+
+set.seed(9857)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+output <- lin.out.sudden.shift(input, a)
+plot <- coeff_plot(output$coefficienti)
+plot
+
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output.final <- output$output + noiseWN
+
+output.plot(noiseWN,output$output,output.final)
+data <- create.data(output.final,input,daily_obs)
+
+
+## SECONDO DATASET - INCREMENTAL SHIFT.
+nvar_input <- 5
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+#Giorno dello shift
+a <- 600
+duration <- 800
+
+set.seed(9857)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+output <- lin.out.incremental.shift(input, a, duration)
+plot <- coeff_plot(output$coefficienti)
+plot
+
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output.final <- output$output + noiseWN
+
+output.plot(noiseWN,output$output,output.final)
+data <- create.data(output.final,input,daily_obs)
+
+
+## TERZO DATASET - GRADUAL SHIFT.
+nvar_input <- 5
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- sqrt(10)
+mu <- rep(0,nvar_input)
+#Giorno dello shift
+a <- 600
+duration <- 800
+
+set.seed(9857)
+Sigma <- get_Sigma(nvar_input, rho=0.15)$mat
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+
+output <- lin.out.gradual.shift(input, a, duration)
+plot <- coeff_plot(output$coefficienti)
+plot
+
+noiseWN <- noise.WN(n_giorni*daily_obs)
+output.final <- output$output + noiseWN
+
+output.plot(noiseWN,output$output,output.final)
+data <- create.data(output.final,input,daily_obs)
+
+
+```
+
+
+
+```{r Prove fixing rf}
+nvar_input <- 80
+n_giorni <- 1825
+daily_obs <- 10
+sd_WN <- 150
+mu <- rep(0,nvar_input)
+Sigma <- diag(rep(1,nvar_input))
+
+set.seed(4921)
+input <- as.data.frame(mvrnorm(n = n_giorni*daily_obs,mu = mu, Sigma = Sigma))
+output.lin <- lin.out(input)
+data <- create.data(output.lin,input, daily_obs)
+
+## Ridge R2 -> 
+
+```
+
+
+
+
+```{r Plot delle relazioni quadratiche}
+## V1 e output
+plot.V1 <- ggplot(data, aes(x = V1, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V1
+
+plot.V2 <- ggplot(data, aes(x = V2, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V2
+
+plot.V3 <- ggplot(data, aes(x = V3, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V3
+
+plot.V4 <- ggplot(data, aes(x = V4, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V4
+
+plot.V5 <- ggplot(data, aes(x = V5, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V5
+
+plot.V6 <- ggplot(data, aes(x = V6, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V6
+
+plot.V7 <- ggplot(data, aes(x = V7, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V7
+
+plot.V8 <- ggplot(data, aes(x = V8, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V8
+
+plot.V9 <- ggplot(data, aes(x = V9, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V9
+
+plot.V10 <- ggplot(data, aes(x = V10, y = output)) + geom_point(stat ="identity") + geom_smooth()
+plot.V10
+
+data.quad
+```
 
 ```{r Parametri degenerazione}
 ## Parametri degenerazione
@@ -814,6 +2194,41 @@ max_dt <- max(data$Days) - (364 + max_t0) - finestra - mse_window
 
 ## Giorni ai quali stimare i modelli.
 days_selected <- seq(365,365+max_t0, by = 3)
+```
+
+```{r Standardizzazione se necessaria}
+vars <- colnames(data)
+escluse <- c("output","Days")
+X <- setdiff(vars,escluse)
+
+quant <- c()
+for(var in X) {
+  if(is.numeric(data[,var])) quant <- c(quant,var)
+}
+qual <- setdiff(X,quant)
+data[,quant] <- scale(data[,quant])
+
+```
+
+```{r Ottenimento dei SSE}
+
+MSSE_t0 <- function(data_x, days_selected, output_pos, days_pos)  {
+  
+  MSSE_df <- data.frame(MSSE_t0 = NA)
+  
+  for (i in days_selected) {
+    
+    t0_train <- (data_x[,"Days"] > i & data_x[,"Days"] <= (i + mse_window))
+    MSSE_df[i - 364,] <- mean((data_x[t0_train,"output"] - mean(data_x[t0_train,"output"]))^2)
+
+  }
+  
+  return(MSSE_df)
+}
+
+data_x <- na.omit(data)
+MSSE_days_sel <- na.omit(MSSE_t0(data_x[,c("Days","output")], days_selected))
+
 ```
 
 
@@ -886,49 +2301,10 @@ colnames(models.attr) <- c("R2","Lambda use","MSE a t0")
 
 ```
 
-```{r Prova ridge primi anni}
-## Prova sul primo anno.
-anno1 <- data$Days <= 365
-
-## Chiaramente qui seleziona il lambda più piccolo, perchè il modello è effettivamente lineare. 
-cv.ridge <- cv.glmnet(x = as.matrix(data[anno1,X]), y = data[anno1,"output"],lambda = lambda, nfolds = 10, alpha = 0)
-cv.ridge$glmnet.fit
-
-
-## Provo ridge_estimates.
-data_x <- as.matrix(data[,c(X,"Days","output")])
-#training = data_x[anno1,]
-
-days.pos <- ncol(data_x) - 1
-out.pos <- ncol(data_x)
-
-i = 365
-train <- data$Days <= i & data$Days > i - 365
-test <- data$Days > i & data$Days <= i + 100
-
-errori <- ridge_estimates(data_x,train,test,lambda=lambda)
-which.min(errori)
-
-## Anno 2
-anno2 <- data$Days > 365 & data$Days <= 365*2
-cv.ridge1 <- cv.glmnet(x = data_x[anno2,-c(days.pos,out.pos)], y = data_x[anno2,out.pos],lambda = lambda, nfolds = 10, alpha = 0)
-cv.ridge1$glmnet.fit
-
-nsets
-cv.ridge2 <- cv_ridge(training = data_x[anno2,],nsets,lambda,time_wise = TRUE)
-which.min(apply(cv.ridge2,2,mean))
-lambda[26]
-
-## Sostanzialmente lo stesso lambda
-
-```
-
 ```{r Degenerazione del modello ridge - Ciclo}
-
-data_x <- as.matrix(data[,c(X,"Days","output")])
-
-#training = data_x[anno1,]
-#colnames(data_x)
+data_x <- data[,c(X,"Days","output")]
+data_x <- na.omit(data_x)
+data_x <- model.matrix(~.,data_x)[,-1]
 
 days.pos <- ncol(data_x) - 1
 out.pos <- ncol(data_x)
@@ -936,11 +2312,9 @@ out.pos <- ncol(data_x)
 ## Griglia di Lambda da usare
 lambda = 10^seq(2, -5, length=150)
 ## Per modello con interazione
-lambda = 10^seq(4, -1, length=200)
+#lambda = 10^seq(4, -1, length=200)
 lambda.use <- NA
-nsets = 4
 
-days_selected <- seq(365,365+max_t0, by = 3)
 set.seed(20024)
 for (i in days_selected) {
   ## Quali osservazioni per stimare il modello
@@ -1007,9 +2381,12 @@ for (i in days_selected) {
 
 models.attr.ridge <- models.attr
 results.ridge <- results
-#models.attr
-#lambda
+models.attr.ridge <- as.data.frame(na.omit(models.attr.ridge))
+results.ridge <- as.data.frame(na.omit(results.ridge))
 
+#plot(as.numeric(results.ridge[40,]))
+models.attr.ridge <- as.data.frame(models.attr.ridge)
+models.attr.ridge$R2_pred <- 1 - models.attr.ridge$`MSE a t0`/MSSE_days_sel$MSSE_t0
 
 ```
 
@@ -1070,14 +2447,10 @@ ridge_plot <- function(models.attr, results, title) {
 ## Facciamolo trasparente.
 blu_points <- rgb(198,219,239, max = 255, alpha=60)
 
-ridge.plot <- ridge_plot(models.attr, results, "Modello Ridge - Input incorrelati")
+ridge.plot <- ridge_plot(models.attr.ridge, results.ridge, "Modello Ridge")
 ridge.plot
 
 ```
-
-
-
-
 
 
 ## Random Forest
@@ -1090,12 +2463,11 @@ rf_estimates <- function(training, train_set, test_set, reg.grid) {
   registerDoParallel(cl)
   
   r <- foreach (j = 1:nrow(reg.grid), .packages = "ranger") %dopar%  {
-    
     tmp_rf <- ranger(output ~ .,
               data=training[train_set,],
               num.tree = reg.grid[j,1],
               importance = "impurity",
-              mtry = reg.grid[j,2])
+              mtry = reg.grid[j,2], oob.error=FALSE)
     
     test.fit <- mean((training[test_set,"output"] - predict(tmp_rf,training[test_set,X])$prediction)^2)
     
@@ -1149,6 +2521,57 @@ cv.rf <- function(training, nsets, reg.grid, time_wise) {
 
 ```
 
+```{r Prova random forest}
+
+## Usando training-test split
+anno1 <- data$Days <= 365
+data_x <- na.omit(data[anno1,c(X,"output")])
+cb1 <- sample(1:nrow(data_x), nrow(data_x)*0.8)
+cb2 <- setdiff(1:nrow(data_x), cb1)
+m.rf <- ranger(output ~ . ,
+              data=data_x[cb1,c(X,"output")],
+              num.tree = 300,
+              importance = "impurity",
+              mtry = 60, verbose =TRUE)
+m.rf$r.squared  ## 0.80, molto vicino a quello che succede nel vero modello lineare.
+## Aumentare il numero di osservazioni ha migliorato moltissimo la random forest.
+
+# Proviamo a togliere le variabili poco influenti.
+X1 <- names(sort(m.rf$variable.importance, decreasing =TRUE)[1:24])
+m.rf <- ranger(output ~ . ,
+              data=data_x[cb1,c(X1,"output")],
+              num.tree = 300,
+              importance = "impurity",
+              mtry = 15, verbose =TRUE)
+m.rf$r.squared  ## è meglio, ma non molto (3% di R2 in più)
+
+fits <- predict(m.rf, data_x[cb2,X])
+sse_cb2 <- sum((fits$predictions - data_x[cb2,"output"])^2)
+dev_cb2 <- sum((data_x[cb2,"output"] - mean(data_x[cb2,"output"]))^2)
+R2 <- 1 - sse_cb2/dev_cb2  ## 0.92 di R2 out-of-sample
+R2
+## Usando training-test temporali.
+data_x <- na.omit(data[data$Days <= 400,])
+cb1 <- data_x$Days <= 365
+cb2 <- data_x$Days > 365
+
+m.rf.temp <- ranger(output ~ . ,
+              data=data_x[cb1,c(X,"output")],
+              num.tree = 300,
+              importance = "impurity",
+              mtry = 60, verbose =TRUE)
+
+fits <- predict(m.rf.temp, data_x[cb2,X])
+sse_cb2 <- sum((fits$predictions - data_x[cb2,"output"])^2)
+dev_cb2 <- sum((data_x[cb2,"output"] - mean(data_x[cb2,"output"]))^2)
+R2 <- 1 - sse_cb2/dev_cb2  ## 0.87, é sensato.
+R2
+
+
+## Più dati aiutano la random forest, ma non risolvono il problema.
+models.attr.ridge[1:10,]
+```
+
 ```{r Degenerazione del modello RF - Oggetti}
 
 ## DATI
@@ -1162,6 +2585,7 @@ X <- setdiff(vars,escluse)
 data_x <- data[,c(X,"Days","output")]
 #training = data_x[anno1,]
 #colnames(data_x)
+data_x <- na.omit(data_x)
 
 days.pos <- ncol(data_x) - 1
 out.pos <- ncol(data_x)
@@ -1179,11 +2603,10 @@ colnames(models.attr) <- c("R2","NumTrees","Mtry","MSE a t0")
 
 
 ## Griglia
-mtry <- seq(31,67, by =6)
+mtry <- seq(31,61, by =6)
 num.trees <- seq(100,340, by = 60)
 reg.grid <- expand.grid(num.trees,mtry)
 colnames(reg.grid) <- c("Num trees","mtry")
-
 
 ```
 
@@ -1214,17 +2637,14 @@ system.time(for (i in 365:(365+max_t0)) {
     ##Elemento ottimale della griglia.
     opt <- which.min(mse_medi)
     regulated <- rbind(regulated, c(i,opt, as.numeric(reg.grid[opt,])))
-    
-    ## Salviamo i parametri del modello.
+
     
   }
 })
 
 colnames(regulated) <- c("Numero","Optimal","Trees","Mtry")
-## La regolazione impiega 1930 per 10 reg. 30 minuti
 regulated.rf <- regulated
 
-## Seleziona sempre 49 mtry. Posso ridurre la griglia.
 ```
 
 ```{r Degenerazione del Random Forest - Ciclo}
@@ -1254,7 +2674,7 @@ r <- foreach (i = days_selected, .packages = "ranger") %dopar% {
               data=data_x[data_to_use,c(X,"output")],
               num.tree = reg.grid[opt,1],
               importance = "impurity",
-              mtry = reg.grid[opt,2])
+              mtry = reg.grid[opt,2], oob.error=FALSE)
   
   ## R2.
   fits.rf <- predict(m.rf,data_x[data_to_use,X])$prediction
@@ -1305,9 +2725,12 @@ for (j in 1:length(days_selected)) {
 
 models.attr.rf <- models.attr
 results.rf <- results
+models.attr.rf <- as.data.frame(na.omit(models.attr.rf))
+results.rf <- as.data.frame(na.omit(results.rf))
 #models.attr
 
-plot(results.rf[364,])
+models.attr.rf <- as.data.frame(models.attr.rf)
+models.attr.rf$R2_pred <- 1 - models.attr.rf$`MSE a t0`/MSSE_days_sel$MSSE_t0
 ```
 
 ```{r Plot modello RF}
@@ -1365,8 +2788,8 @@ rf_plot <- function(models.attr, results, title) {
 ```{r Plot degenerazione Random Forest}
 blu_points <- rgb(198,219,239, max = 255, alpha=20)
 
-rf.plot <- rf_plot(models.attr, results, "Modello RF - Input incorrelati")
-rf.plot
+rf.plot <- rf_plot(models.attr.rf, results.rf, "Modello RF - Input incorrelati")
+rf.plot + ylim(0.7,1.25)
 
 ```
 
@@ -1377,9 +2800,10 @@ rf.plot
 
   tree.num <- function(shrink, depth) {
     
-    #trees = 3000
+    trees = 3000
+    #trees = 6000
     ## Se interazione 8000
-    trees = 12000
+    #trees = 12000
     
     if(depth == 1) trees = trees*2.5
     if(depth == 2) trees = trees*1.8
@@ -1393,9 +2817,10 @@ gb_estimates_par <- function(training, train_set, test_set, reg.grid) {
   
   tree.num <- function(shrink, depth) {
     
-    #trees = 3000
+    trees = 3000
+    #trees = 6000
     ## Se interazione 8000
-    trees = 12000
+    #trees = 12000
     
     if(depth == 1) trees = trees*2.5
     if(depth == 2) trees = trees*1.8
@@ -1485,6 +2910,7 @@ X <- setdiff(vars,escluse)
 #X <- setdiff(X, sample(X,5))
 
 data_x <- data[,c(X,"Days","output")]
+data_x <- na.omit(data_x)
 #training = data_x[anno1,]
 #colnames(data_x)
 
@@ -1504,14 +2930,9 @@ colnames(models.attr) <- c("R2","Grid_opt","MSE a t0","Alberi")
 
 ##Griglia
 shrinkage <- c(0.08)
-depths <- 3:6
+depths <- 1:4
 grid <- expand.grid(depths,shrinkage)
 colnames(grid) <- c("depth","shrink")
-
-## Regulated contiene i modelli migliori.
-regulated <- c()
-trees <- c()
-mse <- c()
 
 ```
 
@@ -1620,7 +3041,7 @@ regulated  ## Ottenuto da "Regolazione Gradient Boosting"
 days_selected <- seq(365,365+max_t0, by = 3)
 
 numCores <- detectCores()
-cl <- makeCluster(numCores - 1)
+cl <- makeCluster(numCores - 2)
 registerDoParallel(cl)
 set.seed(435)
 system.time(
@@ -1713,7 +3134,16 @@ for (j in 1:length(days_selected)) {
 
 models.attr.gb <- models.attr
 results.gb <- results
+models.attr.gb <- as.data.frame(na.omit(models.attr.gb))
+results.gb <- as.data.frame(na.omit(results.gb))
 
+plot(as.numeric(results.rf[1,]))
+plot(as.numeric(results.rf[20,]))
+plot(as.numeric(results.rf[40,]))
+plot(as.numeric(results.rf[80,]))
+
+models.attr.gb <- as.data.frame(models.attr.gb)
+models.attr.gb$R2_pred <- 1 - models.attr.gb$`MSE a t0`/MSSE_days_sel$MSSE_t0
 ```
 
 ```{r Plot modello GB}
@@ -1770,8 +3200,8 @@ gb_plot <- function(models.attr, results, title) {
 ```{r Plot degenerazione Gradient Boosting}
 blu_points <- rgb(198,219,239, max = 255, alpha=20)
 
-gb.plot <- gb_plot(models.attr, results, "Modello GB - Input incorrelati")
-gb.plot
+gb.plot <- gb_plot(models.attr.gb, results.gb, "Modello GB - Input incorrelati")
+gb.plot + ylim(0.75,1.4)
 
 ```
 
@@ -1911,7 +3341,7 @@ nn_estimates_drop_par <- function(training, train_set, test_set, reg.grid, reps,
     
     early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
                                 min_delta = 0,
-                                patience = 3,
+                                patience = 8,
                                 verbose = 0)
     
     for(h in 1:reps) {
@@ -2050,8 +3480,10 @@ X <- setdiff(vars,escluse)
 #X <- setdiff(X, sample(X,5))
 
 data_x <- data[,c(X,"Days","output")]
-#training = data_x[anno1,]
-#colnames(data_x)
+data_x <- na.omit(data_x)
+data_x <- cbind(model.matrix(~., data=data_x[,X])[,-1],data_x[,c("Days","output")])
+data_x <- as.data.frame(data_x)
+X <- setdiff(colnames(data_x),escluse)
 
 days.pos <- ncol(data_x) - 1
 out.pos <- ncol(data_x)
@@ -2644,7 +4076,7 @@ DEV <- sum((validation_y - mean(validation_y))^2)
 
 ```
 
-```{r Regolazione del modello - Dropout}
+```{r Prove regolazione del modello - Dropout}
 
 vars <- colnames(data)
 escluse <- c("output","Days")
@@ -2712,6 +4144,49 @@ DEV <- sum((validation_y - mean(validation_y))^2)
 ## size = c(800*3) --> 0:(0.98,0.93) 0.05:(0.97,0.92) 0.1(0.96,0.89) 0.2(0.92,0.85) 0.6(0.75,0.69)
 
 
+```
+
+```{r PROVE}
+
+early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
+                                      min_delta = 0,
+                                      patience = 15,
+                                      verbose = 0)
+
+anno1 <- data_x$Days <= 365
+first_year <- data_x[anno1,]
+
+cb1 <- sample(1:nrow(first_year), 0.8*nrow(first_year))
+cb2 <- setdiff(1:nrow(first_year), cb1)
+
+model <- create_model_dropout(layers = 3, size = c(100,100,100), n_input=length(X), dropout=0, seed=43221)
+
+storia <- model %>% fit(x = as.matrix(first_year[cb1,X]),
+          y = first_year[cb1,"output"],
+          batch_size = ceiling(length(cb1)/2),
+          epochs = 300,
+          verbose = 1,
+          validation_data = list(as.matrix(first_year[cb2,X]),first_year[cb2,"output"]),
+          callbacks = early_stop)
+
+## performance nel training set.
+fits.nn <- predict(model, as.matrix(first_year[cb1,X]), batch_size = 32, verbose = 0)
+SSE <- sum((as.matrix(first_year[cb1,"output"]) - fits.nn)^2)
+DEV <- sum((first_year[cb1,"output"] - mean(first_year[cb1,"output"]))^2)
+1-SSE/DEV  ## 0.83
+##nel validation set.
+fits.nn <- predict(model, as.matrix(first_year[cb2,X]), batch_size = 32, verbose = 0)
+SSE <- sum((as.matrix(first_year[cb2,"output"]) - fits.nn)^2)
+DEV <- sum((first_year[cb2,"output"] - mean(first_year[cb2,"output"]))^2)
+1-SSE/DEV  ## 0.82 nel validation set.
+
+## Fuori dal primo anno?
+finestra <- data_x$Days >= 366 & data_x$Days <= (366 + mse_window)
+window <- data_x[finestra,]
+fits.nn <- predict(model, as.matrix(window[,X]), batch_size = 32, verbose = 0)
+SSE <- sum((as.matrix(window[,"output"]) - fits.nn)^2)
+DEV <- sum((window[,"output"] - mean(window[,"output"]))^2)
+1-SSE/DEV #0.76, tutto sommato molto buono.
 ```
 
 ```{r Riducendo i dati?}
@@ -2902,7 +4377,7 @@ CVs <- list(X = X)
 
 system.time(
 for (i in 365:(365+max_t0)) {
-  
+  #i = 365
   if((i - 365) %% retrain == 0) {
     
     k = k + 1
@@ -2933,78 +4408,6 @@ CVs[[1]]
 colnames(regulated) <- c("Giorno","Optimal","Dropout")
 regulated.nn <- regulated
 
-
-## Proviamo a ristimare uno di quei modelli
-i=365
-data_to_use <- (data_x[,days.pos]>= (i - 364) & data_x[,days.pos]<=i)
-
-## Creiamo i set di training e di test.
-data_use <- data_x[data_to_use,]
-train <- sample(1:nrow(data_use), floor(nrow(data_use)*0.80))
-training_x <- as.matrix(data_use[train,X])
-training_y <- data_use[train,"output"]
-validation_x <- as.matrix(data_use[-train,X])
-validation_y <- data_use[-train,"output"]
-
-seeds <- floor(runif(3,min=1000, max=9999))
-model.nn <- create_model_dropout(layers, size, length(X), dropout = 0, seed =seeds[1])
-
-storia <- model.nn %>% fit(x = training_x,
-            y = training_y,
-            batch_size = ceiling(length(train)/2),
-            epochs = 500,
-            verbose = 1,
-            validation_data = list(validation_x,validation_y),
-            callbacks = early_stop)
-
-## Abbiamo il modello, ristimiamolo con il corretto numero di epoche.
-epoc <- which.min(storia$metrics$val_mean_squared_error)
-
-model.nn <- create_model_dropout(layers, size, length(X), dropout = 0, seed =seeds[1])
-
-storia <- model.nn %>% fit(x = training_x,
-            y = training_y,
-            batch_size = ceiling(length(train)/2),
-            epochs = epoc,
-            verbose = 1,
-            validation_data = list(validation_x,validation_y))
-
-## Prevediamo da questo modello.
-fits <- predict(model.nn, as.matrix(data_use[,X]), batch_size =32)
-
-dim(as.matrix(data_use[,X]))
-
-SSE <- sum((fits - data_use$output)^2)
-SSE
-DEV <- sum((data_use$output - mean(data_use$output))^2)
-R2 <- 1 - SSE/DEV
-R2
-
-## Verifico l'R2 sul training e sul validation set?
-fits <- predict(model.nn, validation_x, batch_size =32)
-SSE <- sum((fits - validation_y)^2)
-DEV <- sum((validation_y - mean(validation_y))^2)
-R2 <- 1 - SSE/DEV
-R2
-
-## Vediamo il mean_squared_error
-mse_val <- mean((fits - validation_y)^2)
-mse_val
-
-##
-fits <- predict(model.nn, training_x, batch_size =32)
-SSE <- sum((fits - training_y)^2)
-DEV <- sum((training_y - mean(training_y))^2)
-R2 <- 1 - SSE/DEV
-R2
-
-## Verifico l'R2 sul training e sul validation set?
-fits <- predict(model.nn, validation_x, batch_size =32)
-SSE <- sum((fits - validation_y)^2)
-DEV <- sum((validation_y - mean(validation_y))^2)
-R2 <- 1 - SSE/DEV
-R2
-
 ```
 
 ```{r Degenerazione Rete Neurale - Ciclo}
@@ -3012,17 +4415,16 @@ tensorflow::set_random_seed(22167)
 
 #load("C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/INTERAZIONE_con_ERRORE/regulated.nn")
 regulated <- regulated.nn
-days_selected <- seq(365,365+max_t0, by = 3)
 
 regulated  ## Ottenuto da "Regolazione Reti Neurali"
-reps <- 3
+reps=3
 
 layers <- 3
 size <- c(200,200,200)
 
 #stopCluster(cl)
 numCores <- detectCores()
-cl <- makeCluster(numCores - 1)
+cl <- makeCluster(numCores - 2)
 clusterExport(cl, c("layers","size","X"))
 registerDoParallel(cl)
 
@@ -3034,7 +4436,7 @@ r <- foreach (i = days_selected, .packages = c("keras","tensorflow"), .export= c
   
   early_stop <- callback_early_stopping(monitor = "val_mean_squared_error",
                                 min_delta = 0,
-                                patience = 3,
+                                patience = 8,
                                 verbose = 0)
   
   ## Dati da usare
@@ -3141,9 +4543,17 @@ for (j in 1:length(days_selected)) {
   results[days_selected[j] - 364,] <- r[[j]]$prestazioni
 }
 
+r[[1]]$prestazioni
+r[[2]]$prestazioni
+r[[30]]$prestazioni
+
 models.attr.nn <- models.attr
 results.nn <- results
-plot(results.nn[364,])
+models.attr.nn <- as.data.frame(na.omit(models.attr.nn))
+results.nn <- as.data.frame(na.omit(results.nn))
+
+models.attr.nn <- as.data.frame(models.attr.nn)
+models.attr.nn$R2_pred <- 1 - models.attr.nn$`MSE a t0`/MSSE_days_sel$MSSE_t0
 
 ```
 
@@ -3203,140 +4613,115 @@ nn_plot <- function(models.attr, results, title) {
 
 
 ## SALVATAGGIO RISULTATI
-```{r}
+```{r Salvataggio}
+
+path <- "STAZIONARIETA_e_cambiamenti_temporali/COEFFICIENTI_variabili/stagionalita_tutti"
 
 ## Ridge
-save(models.attr.ridge, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.ridge")
-save(results.ridge, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.ridge")
+save(models.attr.ridge, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.ridge"))
+save(results.ridge, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.ridge"))
 
 ## Random Forest
-save(regulated.rf, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/regulated.rf")
-save(models.attr.rf, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.rf")
-save(results.rf, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.rf")
+save(regulated.rf, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/regulated.rf"))
+save(models.attr.rf, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.rf"))
+save(results.rf, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.rf"))
 
 ## Gradient Boosting
-save(regulated.gb, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/regulated.gb")
-save(models.attr.gb, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.gb")
-save(results.gb, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.gb")
+save(regulated.gb, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/regulated.gb"))
+save(models.attr.gb, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.gb"))
+save(results.gb, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.gb"))
 
 ## Neural Network
-save(regulated.nn, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/regulated.nn")
-save(models.attr.nn, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/models.nn")
-save(results.nn, file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/Dataset_PROBLEMI/results.nn")
+save(regulated.nn, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/regulated.nn"))
+save(models.attr.nn, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.nn"))
+save(results.nn, file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.nn"))
 ```
 
 ```{r Grafici finali}
 
-blu_points <- rgb(198,219,239, max = 255, alpha=60)
+#path <- "STAZIONARIETA_e_cambiamenti_temporali/stagionalita_errore/variabili_per_cattura"
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.ridge"))
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.ridge"))
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.rf"))
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.rf"))
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.gb"))
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.gb"))
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/models.nn"))
+load(file =paste0("C:/Users/User/Documents/AI AGING/SIMULAZIONI/",path,"/results.nn"))
 
-## RIDGE
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.ridge")
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.ridge")
-
-## Non ci sono dati mancanti sulla fine.
-models.attr.ridge <- as.data.frame(na.omit(models.attr.ridge))
-results.ridge <- as.data.frame(na.omit(results.ridge))
-  
-ridge.p <- ridge_plot(models.attr.ridge, results.ridge, "Modello Ridge")
-
-
-## RANDOM FOREST
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.rf")
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.rf")
-models.attr.rf <- as.data.frame(na.omit(models.attr.rf))
-results.rf <- as.data.frame(na.omit(results.rf))
-
-rf.p <- rf_plot(models.attr.rf, results.rf, "Modello RF")
-
-## GRADIENT BOOSTING
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.gb")
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.gb")
-models.attr.gb <- as.data.frame(na.omit(models.attr.gb))
-results.gb <- as.data.frame(na.omit(results.gb))
-
-gb.p <- gb_plot(models.attr.gb, results.gb, title = "Modello GB")
-gb.p
-
-## RETE NEURALE
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.nn")
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/results.nn")
-models.attr.nn <- as.data.frame(na.omit(models.attr.nn))
-results.nn <- as.data.frame(na.omit(results.nn))
-
-nn.p <- nn_plot(models.attr.nn, results.nn, title = "Modello NN")
-nn.p
-
-
-
-ridge.p
-rf.p
-gb.p
-nn.p
-```
-
-```{r Ottenimento dei SSE}
-
-MSSE_t0 <- function(data_x, days_selected, output_pos, days_pos)  {
-  
-  MSSE_df <- data.frame(MSSE_t0 = NA)
-  
-  for (i in days_selected) {
-
-    t0_train <- (data_x[,days_pos] > i & data_x[,days_pos] <= (i + mse_window))
-    MSSE_df[i - 364,] <- mean((data_x[t0_train,output_pos] - mean(data_x[t0_train,output_pos]))^2)
-
-  }
-  
-  return(MSSE_df)
+cleaning <- function(obj) {
+  as.data.frame(na.omit(obj))
 }
 
+models.attr.ridge <- cleaning(models.attr.ridge)
+results.ridge <-  cleaning(results.ridge)
+models.attr.rf <- cleaning(models.attr.rf)
+results.rf <-  cleaning(results.rf)
+models.attr.gb <- cleaning(models.attr.gb)
+results.gb <-  cleaning(results.gb)
+models.attr.nn <- cleaning(models.attr.nn)
+results.nn <-  cleaning(results.nn)
 
+
+blu_points <- rgb(198,219,239, max = 255, alpha=60)
+
+
+ridge.p <- ridge_plot(models.attr.ridge, results.ridge, "Modello Ridge")
+rf.p <- rf_plot(models.attr.rf, results.rf, "Modello RF")
+gb.p <- gb_plot(models.attr.gb, results.gb, title = "Modello GB")
+nn.p <- nn_plot(models.attr.nn, results.nn, title = "Modello NN")
+
+plot_tutti <- list(ridge=ridge.p, rf = rf.p, gb = gb.p, nn=nn.p)
+
+ridge.p + ylim(0.7,1.5)
+#plot_ARMA_media$ridge + ylim(0.7,1.5)
+rf.p + ylim(0.7,1.5)
+#plot_ARMA_media$rf + ylim(0.7,1.5)
+gb.p + ylim(0.5,1.8)
+#plot_ARMA_media$gb + ylim(0.7,1.5)
+nn.p + ylim(0.8,1.35)
+#plot_ARMA_media$nn + ylim(0.7,1.5)
+
+
+plot_ARMA_media <- list(ridge=ridge.p, rf = rf.p, gb = gb.p, nn=nn.p)
 ```
 
-```{r R2 predittivi}
+```{r Plot andamento R2}
+R2.plot <- data.frame(days = as.numeric(days_selected) - 364)
+R2.plot$ridge <- models.attr.ridge$R2_pred
+R2.plot$rf <- models.attr.rf$R2_pred
+R2.plot$gb <- models.attr.gb$R2_pred
+R2.plot$nn <- models.attr.nn$R2_pred
 
-## Per il ridge
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.ridge")
-data_x <- as.matrix(data[,c(X,"Days","output")])
-days.pos <- ncol(data_x) - 1
-out.pos <- ncol(data_x)
-models.attr.ridge <- as.data.frame(models.attr.ridge)
+col <- palette.colors(n=4, palette="r4")
 
-days_selected <- seq(365,365+max_t0, by = 3)
+plot_r2 <- ggplot(data = R2.plot, aes(x = days)) +
+  geom_line(aes(y = ridge, color = "Ridge")) +
+  geom_line(aes(y = rf, color = "RF")) +
+  geom_line(aes(y = gb, color = "GB")) +
+  geom_line(aes(y = nn, color = "NN")) +
+  scale_color_manual(
+    values = c("Ridge" = col[1], "RF" = col[2], "GB" = col[3], "NN" = col[4]),
+    labels = c("Ridge", "RF", "GB", "NN"),
+    breaks = c("Ridge", "RF", "GB", "NN")
+  ) + ggtitle("R2 previsivo dei modelli nel tempo")
 
-MSSE_days_sel <- MSSE_t0(data_x, days_selected, out.pos, days.pos)
-models.attr.ridge$R2_pred <- ifelse(!is.na(models.attr.ridge$`MSE a t0`),1 - models.attr.ridge$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
-
-
-## Per la Random Forest
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.rf")
-data_x <- data[,c(X,"Days","output")]
-days.pos <- ncol(data_x) - 1
-out.pos <- ncol(data_x)
-models.attr.rf <- as.data.frame(models.attr.rf)
-
-models.attr.rf$R2_pred <- ifelse(!is.na(models.attr.rf$`MSE a t0`),1 - models.attr.rf$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
-
-
-
-## Gradient Boosting
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.gb")
-data_x <- data[,c(X,"Days","output")]
-days.pos <- ncol(data_x) - 1
-out.pos <- ncol(data_x)
-models.attr.gb <- as.data.frame(models.attr.gb)
-models.attr.gb$R2_pred <- ifelse(!is.na(models.attr.gb$`MSE a t0`),1 - models.attr.gb$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
-
-
-
-## Neural Network
-load(file ="C:/Users/User/Documents/AI AGING/SIMULAZIONI/STAZIONARIETA/POCHI DATI/Meno DATI/models.nn")
-models.attr.nn <- models.attr.nn[-c(nrow(models.attr.nn),nrow(models.attr.nn)-1),]
-data_x <- data[,c(X,"Days","output")]
-days.pos <- ncol(data_x) - 1
-out.pos <- ncol(data_x)
-models.attr.nn <- as.data.frame(models.attr.nn)
-models.attr.nn$R2_pred <- ifelse(!is.na(models.attr.nn$`MSE a t0`),1 - models.attr.nn$`MSE a t0`/MSSE_days_sel$MSSE_t0, NA)
-
+plot_r2
 ```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
